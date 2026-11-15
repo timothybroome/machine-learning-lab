@@ -231,6 +231,14 @@ figcaption { font-weight: 800; font-size: 14px; margin-bottom: 4px; }
 .batch canvas { cursor: pointer; }
 .batch .key { margin: 2px 0 0; }
 .pad-hint, .judge-hint { margin: 0; }
+.panel.d { container-type: inline-size; }
+.d-body { display: flex; flex-direction: column; flex: 1; }
+.d-guess { display: flex; flex-direction: column; }
+.quiet-tag { display: none; font-size: 11px; line-height: 6px; font-weight: 800; color: var(--ink-soft); text-align: center; }
+.unit[data-quiet="true"] .quiet-tag { display: block; }
+.unit[data-quiet="true"] .meter { display: none; }
+.slide-note { margin: 10px 0 0; padding: 8px 10px; border-radius: 10px; background: #f6f1e7; font-weight: 800; font-size: 13.5px; max-width: 410px; }
+.slide-note small { display: block; }
 .report { margin-top: auto; padding-top: 12px; display: flex; flex-direction: column; gap: 7px; }
 .report-title { font-weight: 800; font-size: 14px; border-top: 1.5px dashed var(--ink-faint); padding-top: 10px; }
 .report-title small { display: block; }
@@ -279,16 +287,27 @@ figcaption { font-weight: 800; font-size: 14px; margin-bottom: 4px; }
 .toast-star { color: #ffe27a; }
 .loading { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(246, 240, 228, 0.85); font-family: var(--display); font-size: 22px; z-index: 80; }
 
+@container (min-width: 560px) {
+  .d-body { flex-direction: row; gap: 28px; align-items: flex-start; }
+  .d-guess { flex: 1.3; }
+  .report { flex: 1; margin-top: 0; padding-top: 0; }
+  .report-title { border-top: none; padding-top: 0; }
+}
+
 /* ---------- smaller screens (tablet) ---------- */
 @media (max-width: 1410px) {
-  .panels { grid-template-columns: 322px minmax(420px, 1fr); }
-  .panel.c::before { display: none; }
+  /* not enough room for four in a row: let the panels wrap, in order */
+  .panels { display: flex; flex-wrap: wrap; }
+  .panel.a { flex: 0 0 322px; }
+  .panel.b { flex: 1 1 420px; }
+  .panel.c { flex: 1 1 366px; }
+  .panel.d { flex: 1 1 300px; }
+  .panel + .panel::before { display: none; }
   .hood-body { grid-template-columns: 1fr; }
 }
 @media (max-width: 780px) {
   .lab { padding: 12px 10px 30px; }
-  .panels { grid-template-columns: 1fr; }
-  .panel + .panel::before { content: "↓"; left: 50%; top: -31px; margin: 0 0 0 -15px; display: grid; }
+  .panel.a { flex: 1 1 322px; }
   .story-inner { flex-direction: column; align-items: flex-start; }
   .charts { flex-direction: column; }
   .top h1 { font-size: 24px; }

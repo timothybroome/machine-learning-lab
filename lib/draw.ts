@@ -203,8 +203,8 @@ export function drawChart(
     ctx.stroke();
     ctx.restore();
     ctx.fillStyle = "rgba(15,157,138,0.95)";
-    ctx.textAlign = "right";
-    ctx.fillText(o.goal.label, w - right - 2, Y(o.goal.y) - 8);
+    ctx.textAlign = "left";
+    ctx.fillText(o.goal.label, left + 6, Y(o.goal.y) - 8);
   }
 
   ctx.save();

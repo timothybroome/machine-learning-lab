@@ -3,7 +3,10 @@ import { RNG } from "./rng";
 export const GRID = 28;
 export const PIXELS = GRID * GRID;
 
-export const TUNE = { strokeMin: 1.5, strokeMax: 2.6, noise: 0.04 };
+/** Outline thickness (in pixels) and the amount of pixel noise. */
+const STROKE_MIN = 1.5;
+const STROKE_MAX = 2.6;
+const NOISE = 0.04;
 
 export const CLASS_NAMES = ["triangle", "square", "circle", "line"] as const;
 export type ShapeClass = 0 | 1 | 2 | 3;
@@ -83,7 +86,7 @@ export function generateShape(rng: RNG, cls: number, variety: Variety, extras: G
 
   const rotation = variety.noRotation ? 0 : rng.range(0, Math.PI * 2);
   const filled = variety.outlinesOnly ? false : rng.next() < 0.5;
-  const stroke = rng.range(TUNE.strokeMin, TUNE.strokeMax);
+  const stroke = rng.range(STROKE_MIN, STROKE_MAX);
   const ink = rng.range(0.8, 1);
   const wobble = 0.05 * r;
 
@@ -131,7 +134,7 @@ export function generateShape(rng: RNG, cls: number, variety: Variety, extras: G
       if (isLine) v = clamp01(stroke / 2 + 0.5 - d);
       else if (filled) v = clamp01(0.5 - d);
       else v = clamp01(stroke / 2 + 0.5 - Math.abs(d));
-      out[y * GRID + x] = clamp01(v * ink + rng.gauss() * TUNE.noise);
+      out[y * GRID + x] = clamp01(v * ink + rng.gauss() * NOISE);
     }
   }
   return out;

@@ -81,6 +81,13 @@ const tri = (cx: number, cy: number, r: number, rot = -Math.PI / 2): [number, nu
   await page.locator(".stencil").nth(1).click();
   await page.waitForTimeout(300);
   await page.screenshot({ path: `${out}/05-stencil-numbers.png` });
+  {
+    const box = (await page.locator("canvas.pad").boundingBox())!;
+    await page.mouse.move(box.x + 150, box.y + 30);
+    await page.mouse.move(box.x + 110, box.y + 110, { steps: 5 });
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: `${out}/05b-slide-by-hand.png` });
+  }
   await page.keyboard.press("Escape");
   await page.locator(".unit").nth(3).hover();
   await page.waitForTimeout(300);
@@ -122,6 +129,29 @@ const tri = (cx: number, cy: number, r: number, rot = -Math.PI / 2): [number, nu
     await drawPoly(page, tri(14, 14, 8, 0.4));
     console.log("triangle in the middle, centred-only network:", await bars(page));
     await page.screenshot({ path: `${out}/10-centred-only.png`, fullPage: true });
+  }
+
+  // under the hood: run the gradient check in the browser
+  await page.locator("details.hood summary").click();
+  await page.getByRole("button", { name: /Run the check/ }).click();
+  await page.waitForTimeout(400);
+  const verdicts = await page.$$eval("table.math tbody td:last-child", (tds) => tds.map((t) => t.textContent).join(","));
+  console.log("in-browser gradient check:", verdicts);
+  await page.locator("details.hood").screenshot({ path: `${out}/13-under-the-hood.png` });
+
+  // stretch goal: the 4th class
+  if (!quick) {
+    await page.evaluate("window.scrollTo(0, 0)");
+    if (await page.getByRole("switch", { name: "centred only" }).getAttribute("aria-checked") === "true")
+      await page.getByRole("switch", { name: "centred only" }).click();
+    await page.getByRole("switch", { name: /4th shape/ }).click();
+    await page.getByRole("button", { name: /Reset/ }).click();
+    await page.getByRole("button", { name: "Train", exact: true }).click();
+    await page.waitForTimeout(20000);
+    await page.getByRole("button", { name: "Pause" }).click();
+    console.log("4 classes after 20 s:", JSON.stringify(await stats(page)));
+    await page.evaluate("window.scrollTo(0, 0)");
+    await page.screenshot({ path: `${out}/14-four-classes.png`, fullPage: true });
   }
 
   // tablet width

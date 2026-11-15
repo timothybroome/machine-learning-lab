@@ -120,6 +120,8 @@ export default function StencilLab() {
   const lrRef = useRef(DEFAULT_LR);
   const popRef = useRef<Pop | null>(null);
   const hoverUnit = useRef<number | null>(null);
+  const padHover = useRef<[number, number] | null>(null);
+  const slideText = useRef<HTMLSpanElement | null>(null);
   const lastStats = useRef(0);
   const lastFrame = useRef(0);
   const celebrated = useRef(false);
@@ -216,6 +218,34 @@ export default function StencilLab() {
         ctx.lineTo(PAD, i * CELL + 0.5);
       }
       ctx.stroke();
+      // slide the pinned stencil by hand: show its 5x5 window under the pointer and the points it scores there
+      if (p && p.kind === "stencil" && p.pinned) {
+        const hover = padHover.current;
+        let message = "Move your pointer over the pad to slide this stencil by hand.";
+        if (hover) {
+          const wx = Math.max(0, Math.min(C1 - 1, Math.floor(hover[0]) - 2));
+          const wy = Math.max(0, Math.min(C1 - 1, Math.floor(hover[1]) - 2));
+          const f = p.index;
+          const m = maxAbs(net.W1, f * 25, 25) || 1;
+          let points = net.b1[f];
+          for (let ky = 0; ky < K1; ky++)
+            for (let kx = 0; kx < K1; kx++) {
+              const w = net.W1[f * 25 + ky * K1 + kx];
+              points += w * x[(wy + ky) * GRID + wx + kx];
+              const a = Math.abs(w) / m;
+              ctx.fillStyle = w >= 0 ? `rgba(242,125,22,${0.55 * a})` : `rgba(38,104,222,${0.55 * a})`;
+              ctx.fillRect((wx + kx) * CELL, (wy + ky) * CELL, CELL, CELL);
+            }
+          ctx.strokeStyle = "#1f2a44";
+          ctx.lineWidth = 2.5;
+          ctx.strokeRect(wx * CELL, wy * CELL, K1 * CELL, K1 * CELL);
+          message =
+            points > 0
+              ? `Here it scores ${points.toFixed(2)} points.`
+              : `Here it scores ${points.toFixed(2)}, which is squashed to 0 points.`;
+        }
+        if (slideText.current) slideText.current.textContent = message;
+      }
       const hu = p && p.kind === "unit" ? p.index : hoverUnit.current;
       if (hu !== null && spots[hu].score > 0) strokeHotSpot(ctx, spots[hu].x, spots[hu].y, HOT_SIZE, CELL, 0, 0, 3);
     }
@@ -590,8 +620,12 @@ export default function StencilLab() {
     stroke(p, p);
   };
   const onPadMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!lastPoint.current) return;
     const p = toGrid(e);
+    if (e.pointerType === "mouse") {
+      padHover.current = p;
+      if (popRef.current?.pinned) dirty.current = true;
+    }
+    if (!lastPoint.current) return;
     stroke(lastPoint.current, p);
     lastPoint.current = p;
   };
@@ -603,7 +637,7 @@ export default function StencilLab() {
   const place = (el: HTMLElement, kind: Pop["kind"]): { left: number; top: number } => {
     const r = el.getBoundingClientRect();
     const w = kind === "stencil" ? 452 : 400;
-    const h = kind === "stencil" ? 330 : 400;
+    const h = kind === "stencil" ? 400 : 400;
     let left = r.right + 14;
     if (left + w > window.innerWidth - 8) left = r.left - w - 14;
     if (left < 8) left = Math.max(8, (window.innerWidth - w) / 2);
@@ -636,6 +670,26 @@ export default function StencilLab() {
       window.removeEventListener("keydown", key);
     };
   }, [pop?.pinned]);
+
+  // space bar starts and pauses training; resizing the window redraws the charts
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (e.code !== "Space" || t.closest("input, button, summary, [role=switch]")) return;
+      e.preventDefault();
+      setRunning((r) => !r);
+    };
+    const resize = () => {
+      seen.current.step = -1;
+      dirty.current = true;
+    };
+    window.addEventListener("keydown", key);
+    window.addEventListener("resize", resize);
+    return () => {
+      window.removeEventListener("keydown", key);
+      window.removeEventListener("resize", resize);
+    };
+  }, []);
 
   // ---- story mode -----------------------------------------------------------------------
   const storyStep = story !== null ? STORY[story] : null;
@@ -751,6 +805,10 @@ export default function StencilLab() {
               onPointerMove={onPadMove}
               onPointerUp={onPadUp}
               onPointerCancel={onPadUp}
+              onPointerLeave={() => {
+                padHover.current = null;
+                dirty.current = true;
+              }}
               aria-label="Drawing pad: draw a shape here"
             />
           </div>
@@ -768,7 +826,10 @@ export default function StencilLab() {
               <Shuffle size={16} /> Random shape
             </button>
           </div>
-          <p className="hint pad-hint">Draw a triangle, a square or a circle. Everything to the right updates as you draw.</p>
+          <p className="hint pad-hint">
+            Draw a triangle, a square{nClasses === 4 ? ", a circle or a line" : " or a circle"}. Everything to the right
+            updates as you draw.
+          </p>
           <figure className="batch">
             <figcaption>
               {trained ? (
@@ -866,6 +927,7 @@ export default function StencilLab() {
                     style={{ width: THUMB_PX * 2 + 2, height: THUMB_PX * 2 + 2 }}
                   />
                 </span>
+                <span className="quiet-tag">quiet on this drawing</span>
                 <span className="meter" title="How strongly this unit fired on your drawing (points)">
                   <span ref={(el) => { strengthBar.current[u] = el as HTMLDivElement | null; }} />
                 </span>
@@ -881,6 +943,8 @@ export default function StencilLab() {
         {/* ---------------- D ---------------- */}
         <section className={`panel d${zoneClass("D")}`}>
           <PanelHead letter="D" title="The answer" tech="final judge · fully connected + softmax" />
+          <div className="d-body">
+          <div className="d-guess">
           <div className="verdict" data-blank={stats?.blank ? "true" : "false"}>
             <div className="verdict-icon">
               {stats && !stats.blank ? <ShapeIcon cls={stats.guess} size={44} /> : <Pencil size={34} />}
@@ -909,6 +973,7 @@ export default function StencilLab() {
           <p className="hint judge-hint">
             The judge adds up points from layer 2 and shares out 100% between the shapes.
           </p>
+          </div>
           <div className="report">
             <div className="report-title">
               Report card <small>on {TEST_SIZE} test shapes it never practised</small>
@@ -933,6 +998,7 @@ export default function StencilLab() {
               );
             })}
           </div>
+          </div>
         </section>
       </main>
 
@@ -940,7 +1006,7 @@ export default function StencilLab() {
       <section className={`strip${zoneClass("strip")}`}>
         <div className="strip-row controls">
           <div className={`buttons${storyStep?.focus === "train" ? " focus" : ""}`}>
-            <button className="btn primary big" onClick={() => setRunning(true)} disabled={running || !ready}>
+            <button className="btn primary big" onClick={() => setRunning(true)} disabled={running || !ready} title="Start practising (space bar)">
               <Play size={20} /> Train
             </button>
             <button className="btn big" onClick={() => setRunning(false)} disabled={!running}>
@@ -1159,6 +1225,12 @@ export default function StencilLab() {
                     </figcaption>
                   </figure>
                 </div>
+                {pop.pinned && (
+                  <p className="slide-note">
+                    <span ref={slideText}>Move your pointer over the pad to slide this stencil by hand.</span>{" "}
+                    <small>points = knob × ink, added up over the 25 squares, plus the extra knob</small>
+                  </p>
+                )}
               </>
             ) : (
               <>

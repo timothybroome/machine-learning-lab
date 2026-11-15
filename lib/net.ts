@@ -57,7 +57,8 @@ export interface Cache {
   dlogits: Float64Array;
 }
 
-export const INIT = { w1: 0.1, w2: 0.2, w3: 0.1, decay: 0.01, clip: 2.5 };
+/** Starting sizes of the random knobs, and the two safety belts used while training. */
+export const SETTINGS = { w1: 0.1, w2: 0.2, w3: 0.1, decay: 0.01, clip: 2.5 };
 
 export function createNet(nClasses: number, rng: RNG): Net {
   const net: Net = {
@@ -70,9 +71,9 @@ export function createNet(nClasses: number, rng: RNG): Net {
     b3: new Float64Array(nClasses),
   };
   // Small random starting values: this is the "random speckle".
-  for (let i = 0; i < net.W1.length; i++) net.W1[i] = rng.gauss() * INIT.w1;
-  for (let i = 0; i < net.W2.length; i++) net.W2[i] = rng.gauss() * INIT.w2;
-  for (let i = 0; i < net.W3.length; i++) net.W3[i] = rng.gauss() * INIT.w3;
+  for (let i = 0; i < net.W1.length; i++) net.W1[i] = rng.gauss() * SETTINGS.w1;
+  for (let i = 0; i < net.W2.length; i++) net.W2[i] = rng.gauss() * SETTINGS.w2;
+  for (let i = 0; i < net.W3.length; i++) net.W3[i] = rng.gauss() * SETTINGS.w3;
   return net;
 }
 
@@ -293,11 +294,11 @@ export function sgdStep(net: Net, g: Net, lr: number, batchSize: number): number
     for (let i = 0; i < d.length; i++) sq += d[i] * d[i];
   }
   const norm = Math.sqrt(sq) / batchSize;
-  const scale = (lr / batchSize) * (norm > INIT.clip ? INIT.clip / norm : 1);
+  const scale = (lr / batchSize) * (norm > SETTINGS.clip ? SETTINGS.clip / norm : 1);
   for (const key of PARAM_KEYS) {
     const w = net[key];
     const d = g[key];
-    const keep = key === "W1" ? 1 - lr * INIT.decay : 1;
+    const keep = key === "W1" ? 1 - lr * SETTINGS.decay : 1;
     for (let i = 0; i < w.length; i++) {
       w[i] = w[i] * keep - scale * d[i];
       d[i] = 0;
