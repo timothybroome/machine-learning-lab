@@ -118,6 +118,8 @@ export const TEXT = {
   star: "There is no star box, so it has to squeeze the star into triangle, square or circle.",
   slowmoSafe: "Slow-mo is a rehearsal: the real training run is not changed.",
   noLabel: "You drew this card, so nothing is written on the back. No label means no marking.",
+  fresh: "It has not practised yet, so there are no guesses or scores to show. Press Train, or Slow-mo to follow one card.",
+  freshCards: "Click a card to pick it. Under each card is its label. It has not practised yet, so there are no guesses, ticks, crosses or scores to show.",
   drawer: ["Has drawing rules", "“Three straight sides make a triangle”", "Never changes"],
   learner: ["Has no rules", "Only sees dots and labels", "Only has 1,395 knobs to turn"],
 };

@@ -50,6 +50,7 @@ interface Stats {
   probs: number[];
   blank: boolean;
   narrow: boolean;
+  fresh: boolean;
 }
 
 /** A number on screen, with its one-line hover note. */
@@ -116,7 +117,7 @@ export default function StencilLab() {
   const needsReset = (Object.keys(variety) as (keyof Variety)[]).some((k) => variety[k] !== applied[k]);
 
   // ---- drawing everything ---------------------------------------------------------------
-  const render = useCallback(() => {
+  const render = useCallback((cardChanged: boolean) => {
     const lab = labRef.current;
     const cache = view.current;
     if (!lab || !cache) return;
@@ -132,7 +133,8 @@ export default function StencilLab() {
     }
 
     // A. the card on the pad
-    if (padCanvas.current) {
+    // (only when the card itself changed: training turns knobs, it does not change the picture)
+    if (padCanvas.current && cardChanged) {
       const ctx = prepare(padCanvas.current, PAD, PAD);
       paintGrid(ctx, x, 0, GRID, GRID, 1, "ink", 0, 0, PAD, PAD);
       ctx.strokeStyle = "rgba(31,42,68,0.07)";
@@ -212,9 +214,11 @@ export default function StencilLab() {
     }
 
     // D. the judge shares out 100%
+    // (nothing to show until it has practised, unless slow-mo has been asked for a guess)
+    const quiet = lab.fresh && stageRef.current < 2;
     for (let c = 0; c < 3; c++) {
-      if (barFill.current[c]) barFill.current[c]!.style.width = `${cache.probs[c] * 100}%`;
-      if (barText.current[c]) barText.current[c]!.textContent = `${Math.round(cache.probs[c] * 100)}%`;
+      if (barFill.current[c]) barFill.current[c]!.style.width = quiet ? "0%" : `${cache.probs[c] * 100}%`;
+      if (barText.current[c]) barText.current[c]!.textContent = quiet ? "" : `${Math.round(cache.probs[c] * 100)}%`;
     }
   }, []);
 
@@ -263,10 +267,11 @@ export default function StencilLab() {
     if (accCanvas.current) {
       const w = accCanvas.current.clientWidth;
       const h = accCanvas.current.clientHeight;
-      const xs = lab.accHistory.map((a) => a.step);
+      const scores = lab.fresh ? [] : lab.accHistory;
+      const xs = scores.map((a) => a.step);
       const series = [];
-      if (lab.narrow) series.push({ ys: lab.accHistory.map((a) => a.wide * 100), xs, color: "#8a4fd3", width: 2, dash: [5, 4], dots: true });
-      series.push({ ys: lab.accHistory.map((a) => a.acc * 100), xs, color: "#0f9d8a", width: 2.5, dots: true });
+      if (lab.narrow) series.push({ ys: scores.map((a) => a.wide * 100), xs, color: "#8a4fd3", width: 2, dash: [5, 4], dots: true });
+      series.push({ ys: scores.map((a) => a.acc * 100), xs, color: "#0f9d8a", width: 2.5, dots: true });
       drawChart(prepare(accCanvas.current, w, h), w, h, series, { xMax, yMin: 0, yMax: 100, yTicks: [0, 50, 100], yFormat: (v) => `${v}%`, xLabel: "nudges" });
     }
     // ticker: the 16 cards it just practised on, with ticks and crosses
@@ -331,9 +336,10 @@ export default function StencilLab() {
 
       if (lab.version !== s.version || dirty.current) {
         s.version = lab.version;
+        const cardChanged = dirty.current;
         dirty.current = false;
         forward(lab.net, card.current.x, cache);
-        render();
+        render(cardChanged);
       }
       if (lab.top !== s.top || lab.step !== s.step || lab.accHistory.length !== s.accLen) {
         s.top = lab.top;
@@ -355,6 +361,7 @@ export default function StencilLab() {
           probs: Array.from(cache.probs),
           blank: ink < 4,
           narrow: lab.narrow,
+          fresh: lab.fresh,
         });
         if (lab.lastBatch.length && lab.step % 8 === 0) setStrip(lab.lastBatch.slice(0, 5).map((b) => b.index));
       }
@@ -487,8 +494,9 @@ export default function StencilLab() {
   const hover = (p: string) => () => !stage && story === null && setIdea(p === "D" && info.label !== null ? 5 : PANEL_IDEA[p]);
   const probs = stage && slow ? slow.probs : (stats?.probs ?? [1 / 3, 1 / 3, 1 / 3]);
   const guess = probs.indexOf(Math.max(...probs));
-  const trained = (stats?.step ?? 0) > 0;
-  const sum = info.label !== null ? sumText(probs[info.label], info.label) : null;
+  const fresh = stats?.fresh ?? true;
+  const quiet = fresh && stage < 2; // not practised yet: no guesses, ticks, crosses or scores on screen
+  const sum = info.label !== null && !quiet ? sumText(probs[info.label], info.label) : null;
   const kindText = { practice: "A practice card", test: "A test card", drawn: "Your own drawing", star: "A star" }[info.kind];
   const lrWord = lr < 0.02 ? "tiny nudges: slow but steady" : lr < 0.2 ? "medium nudges" : "huge nudges: fast but wobbly";
   const lab = labRef.current;
@@ -688,7 +696,7 @@ export default function StencilLab() {
           <PanelHead letter="D" title="The judge" tech="fully connected layer + softmax" />
           <div className="bars" data-blank={stats?.blank ? "true" : "false"}>
             {[0, 1, 2].map((c) => (
-              <div key={c} className={`bar-row${!stats?.blank && guess === c ? " win" : ""}${info.label === c ? " right" : ""}`}>
+              <div key={c} className={`bar-row${!stats?.blank && !quiet && guess === c ? " win" : ""}${info.label === c && !quiet ? " right" : ""}`}>
                 <span className="bar-icon">
                   <ShapeIcon cls={c} size={22} />
                 </span>
@@ -712,7 +720,12 @@ export default function StencilLab() {
           <div className="marking">
             {info.kind === "star" ? (
               <p>
-                <Star size={16} /> {TEXT.star} It picked <b>{CLASS_NAMES[guess]}</b>.
+                <Star size={16} /> {TEXT.star}
+                {!quiet && (
+                  <>
+                    {" "}It picked <b>{CLASS_NAMES[guess]}</b>.
+                  </>
+                )}
               </p>
             ) : sum && info.label !== null ? (
               <>
@@ -728,10 +741,14 @@ export default function StencilLab() {
                   </N>
                 </div>
               </>
+            ) : info.label !== null ? (
+              <div className="sub">
+                Label on the back: <b>{CLASS_NAMES[info.label]}</b>
+              </div>
             ) : (
               <p>{stats?.blank ? "Draw a shape on the pad, or pick a card." : TEXT.noLabel}</p>
             )}
-            {!trained && !stats?.blank && <p className="note">No practice yet, so its bets are as good as rolling dice.</p>}
+            {quiet ? <p className="note">{TEXT.fresh}</p> : fresh && <p className="note">No practice yet, so its bets are as good as rolling dice.</p>}
           </div>
         </section>
       </main>
@@ -876,14 +893,14 @@ export default function StencilLab() {
                   test score <small>accuracy</small>
                 </span>
                 <N className="counter-value" note={`How many of the ${TEST_SIZE} test cards it gets right. It never practises on these.`}>
-                  {stats?.acc != null ? `${Math.round(stats.acc * 100)}%` : "…"}
+                  {stats?.acc != null && !fresh ? `${Math.round(stats.acc * 100)}%` : "–"}
                 </N>
               </div>
               {stats?.narrow && (
                 <div className="counter purple">
                   <span className="counter-label">every-kind score</span>
                   <N className="counter-value" note={`Its score on ${TEST_SIZE} test cards of every kind: any place, any angle, filled or outlined. It only practised on the narrow kind.`}>
-                    {stats.wide != null ? `${Math.round(stats.wide * 100)}%` : "…"}
+                    {stats.wide != null && !fresh ? `${Math.round(stats.wide * 100)}%` : "–"}
                   </N>
                 </div>
               )}

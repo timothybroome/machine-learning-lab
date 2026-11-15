@@ -42,14 +42,27 @@ export interface BatchItem {
   guess: number;
 }
 
-function makePile(rng: RNG, n: number, variety: Variety): Pile {
+/** Also returns `made`: where in the shuffled pile the 1st, 2nd, 3rd... card that was drawn ended up. */
+function makePile(rng: RNG, n: number, variety: Variety): Pile & { made: Int32Array } {
   const x: Float64Array[] = [];
   const y = new Int32Array(n);
   for (let i = 0; i < n; i++) {
     y[i] = i % 3; // balanced: the same number of each shape
-    x.push(generateShape(rng, y[i], variety));
+    x.push(generateShape(rng, y[i], variety)); // the picture is drawn from its own label
   }
-  return { x, y };
+  // shuffle the pile so it is a mix, not triangle, square, circle over and over.
+  // Each picture and its label move together, so they can never get out of step.
+  const mix = new RNG(SEED ^ n);
+  const from = Int32Array.from({ length: n }, (_, i) => i);
+  for (let i = n - 1; i > 0; i--) {
+    const j = mix.int(i + 1);
+    [x[i], x[j]] = [x[j], x[i]];
+    [y[i], y[j]] = [y[j], y[i]];
+    [from[i], from[j]] = [from[j], from[i]];
+  }
+  const made = new Int32Array(n);
+  for (let i = 0; i < n; i++) made[from[i]] = i;
+  return { x, y, made };
 }
 
 type Job =
@@ -79,6 +92,8 @@ export class Lab {
   /** milliseconds of practice so far, by the clock on the wall (the page adds to this while training) */
   trainMs = 0;
   reached85Ms: number | null = null;
+  /** true after Reset until the first nudge: it has not practised, so the page shows no guesses or scores */
+  fresh = true;
 
   private order!: Int32Array;
   private cursor = 0;
@@ -98,14 +113,16 @@ export class Lab {
     this.grads = zerosLike(this.net);
     this.cache = createCache(3);
     const rng = new RNG(SEED ^ 0x9e3779b9);
-    this.train = makePile(rng, TRAIN_SIZE, variety);
+    const train = makePile(rng, TRAIN_SIZE, variety);
+    this.train = train;
     this.test = makePile(rng, TEST_SIZE, variety);
     this.wideTest = this.narrow ? makePile(rng, TEST_SIZE, FULL_VARIETY) : this.test;
     this.batchRng = new RNG(SEED ^ 0x51ed270b);
-    this.order = Int32Array.from({ length: TRAIN_SIZE }, (_, i) => i);
+    this.order = Int32Array.from(train.made); // practise in a shuffle of the order the cards were drawn in
     this.batchRng.shuffle(this.order);
     this.cursor = 0;
     this.clearHistory();
+    this.fresh = true;
   }
 
   /** Swap in a saved brain. The cards stay the same; the charts start again. */
@@ -113,6 +130,7 @@ export class Lab {
     this.net = net;
     this.grads = zerosLike(net);
     this.clearHistory();
+    this.fresh = false;
   }
 
   private clearHistory(): void {
@@ -159,6 +177,7 @@ export class Lab {
     sgdStep(net, grads, lr, BATCH);
     const loss = lossSum / BATCH;
     this.step++;
+    this.fresh = false;
     this.cardsSeen += BATCH;
     this.lastBatch = batch;
     this.lossHistory.push(loss);

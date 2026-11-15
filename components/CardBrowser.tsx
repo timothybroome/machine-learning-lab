@@ -53,6 +53,7 @@ export default function CardBrowser({
   const [sel, setSel] = useState<Sel>(null);
   const canvases = { practice: useRef<HTMLCanvasElement | null>(null), test: useRef<HTMLCanvasElement | null>(null) };
   const piles = { practice: lab.train, test: lab.test };
+  const fresh = lab.fresh; // not practised yet: show only the pictures and their names
   const cols = typeof window !== "undefined" && window.innerWidth >= 1200 ? { practice: 12, test: 6 } : { practice: 9, test: 4 };
 
   // mark every card with the brain as it is right now
@@ -84,7 +85,8 @@ export default function CardBrowser({
       const H = Math.max(CH, Math.ceil(list.length / n) * CH);
       cv.style.width = `${W}px`;
       cv.style.height = `${H}px`;
-      const ctx = prepare(cv, W, H, 2);
+      // stay inside the canvas size limits of phones and tablets (about 16,000 pixels tall, 16 million in all)
+      const ctx = prepare(cv, W, H, Math.min(2, 16000 / H, Math.sqrt(16e6 / (W * H))));
       ctx.clearRect(0, 0, W, H);
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
@@ -102,7 +104,7 @@ export default function CardBrowser({
         ctx.fillStyle = "rgba(31,42,68,0.85)";
         ctx.fillText(CLASS_NAMES[piles[name].y[i]], ox + IMG / 2, oy + IMG + 9);
         ctx.fillStyle = ok ? "#0a7a6b" : "#d13438";
-        ctx.fillText(`${ok ? "✓" : "✗"} ${marks[name].loss[i].toFixed(2)}`, ox + IMG / 2, oy + IMG + 21);
+        if (!fresh) ctx.fillText(`${ok ? "✓" : "✗"} ${marks[name].loss[i].toFixed(2)}`, ox + IMG / 2, oy + IMG + 21);
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -137,10 +139,15 @@ export default function CardBrowser({
             </span>
           ))}
           <br />
-          <span title="How many it guesses right at this moment, with the brain as it is now">
-            right now it gets {c.right} right and {c.total - c.right} wrong
-          </span>{" "}
-          · showing <span title="Cards that match the filters above">{lists[name].length}</span>
+          {!fresh && (
+            <>
+              <span title="How many it guesses right at this moment, with the brain as it is now">
+                right now it gets {c.right} right and {c.total - c.right} wrong
+              </span>{" "}
+              ·{" "}
+            </>
+          )}
+          showing <span title="Cards that match the filters above">{lists[name].length}</span>
         </p>
         <div className="pile-scroll">
           <canvas
@@ -154,7 +161,9 @@ export default function CardBrowser({
               e.currentTarget.title =
                 i === undefined
                   ? ""
-                  : `Label: ${CLASS_NAMES[piles[name].y[i]]}. It guesses ${CLASS_NAMES[marks[name].guess[i]]}. How wrong: ${marks[name].loss[i].toFixed(2)} (0 is sure and right, about 1.1 is a wild guess).`;
+                  : fresh
+                    ? `Label: ${CLASS_NAMES[piles[name].y[i]]}.`
+                    : `Label: ${CLASS_NAMES[piles[name].y[i]]}. It guesses ${CLASS_NAMES[marks[name].guess[i]]}. How wrong: ${marks[name].loss[i].toFixed(2)} (0 is sure and right, about 1.1 is a wild guess).`;
             }}
           />
         </div>
@@ -182,6 +191,8 @@ export default function CardBrowser({
               </button>
             ))}
           </span>
+          {!fresh && (
+            <>
           <span className="seg" role="group" aria-label="Filter by result">
             {(["all", "right", "wrong"] as const).map((r) => (
               <button key={r} className={result === r ? "on" : ""} onClick={() => setResult(r)}>
@@ -193,6 +204,8 @@ export default function CardBrowser({
             <span className="knob" />
             hardest first <small>sort by how wrong</small>
           </button>
+            </>
+          )}
           <button
             className="btn small push-right"
             onClick={() => {
@@ -217,8 +230,13 @@ export default function CardBrowser({
           {picked && sel ? (
             <>
               <span>
-                Picked a {sel.pile} card. Label: <b>{CLASS_NAMES[picked.y]}</b>. It guesses <b>{CLASS_NAMES[picked.m.guess[sel.index]]}</b>, how wrong{" "}
-                <b title="How wrong on this card: 0 is sure and right, about 1.1 is a wild guess">{picked.m.loss[sel.index].toFixed(2)}</b>.
+                Picked a {sel.pile} card. Label: <b>{CLASS_NAMES[picked.y]}</b>.
+                {!fresh && (
+                  <>
+                    {" "}It guesses <b>{CLASS_NAMES[picked.m.guess[sel.index]]}</b>, how wrong{" "}
+                    <b title="How wrong on this card: 0 is sure and right, about 1.1 is a wild guess">{picked.m.loss[sel.index].toFixed(2)}</b>.
+                  </>
+                )}
               </span>
               <button className="btn" onClick={() => onPick(picked.x, picked.y, sel.pile, false)}>
                 Put it on the pad
@@ -228,7 +246,7 @@ export default function CardBrowser({
               </button>
             </>
           ) : (
-            <span>Click a card to pick it. Under each card: its label, then a tick or cross and how wrong the brain is on it right now.</span>
+            <span>{fresh ? TEXT.freshCards : "Click a card to pick it. Under each card: its label, then a tick or cross and how wrong the brain is on it right now."}</span>
           )}
         </footer>
       </div>

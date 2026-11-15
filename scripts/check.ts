@@ -130,6 +130,8 @@ check("over 85% on the 300 test cards within 30 s", acc > 0.85, `test score ${(a
 
 // --- download the brain, load it fresh: same test score -----------------------
 {
+  // mark the brain as it is now, the way the Download button does (the last chart point can be up to 24 nudges old)
+  const acc = lab.accuracyOn(lab.test);
   const file = JSON.stringify(brainToObject(lab.net, acc));
   const fresh = new Lab();
   fresh.loadBrain(brainFromObject(JSON.parse(file)) as Net);

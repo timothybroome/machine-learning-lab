@@ -8,23 +8,6 @@ export const PINK = "#e0387a";
 
 type RGB = readonly [number, number, number];
 
-let scratch: HTMLCanvasElement | null = null;
-let scratchCtx: CanvasRenderingContext2D | null = null;
-let scratchImage: ImageData | null = null;
-
-function getScratch(w: number, h: number): [HTMLCanvasElement, CanvasRenderingContext2D, ImageData] {
-  if (!scratch) {
-    scratch = document.createElement("canvas");
-    scratchCtx = scratch.getContext("2d")!;
-  }
-  if (scratch.width !== w || scratch.height !== h || !scratchImage) {
-    scratch.width = w;
-    scratch.height = h;
-    scratchImage = scratchCtx!.createImageData(w, h);
-  }
-  return [scratch, scratchCtx!, scratchImage];
-}
-
 /** Make a canvas crisp on high-density screens. Returns a context scaled so 1 unit = 1 CSS pixel. */
 export function prepare(canvas: HTMLCanvasElement, cssW: number, cssH: number, maxDpr = 3): CanvasRenderingContext2D {
   const dpr = Math.min(maxDpr, window.devicePixelRatio || 1);
@@ -43,6 +26,10 @@ export function prepare(canvas: HTMLCanvasElement, cssW: number, cssH: number, m
 /**
  * Paint a small grid of values as big chunky pixels.
  * `mode` picks the colours: "ink" (paper to navy), "fire" (white to orange) or "heat" (blue, white, orange).
+ *
+ * Every call builds its own block of pixels and writes it straight onto the canvas. An earlier version painted
+ * each grid onto one shared hidden canvas and copied that across; some browsers do that copy late, after the
+ * hidden canvas has been painted over, so many cards came out showing the same wrong picture.
  */
 export function paintGrid(
   ctx: CanvasRenderingContext2D,
@@ -58,9 +45,16 @@ export function paintGrid(
   dh: number,
   alpha = 1,
 ): void {
-  const [cv, sctx, img] = getScratch(w, h);
+  // work in real screen pixels: putImageData ignores the canvas scale
+  const t = ctx.getTransform();
+  const X0 = Math.round(dx * t.a + t.e);
+  const Y0 = Math.round(dy * t.d + t.f);
+  const W = Math.max(1, Math.round((dx + dw) * t.a + t.e) - X0);
+  const H = Math.max(1, Math.round((dy + dh) * t.d + t.f) - Y0);
+  const img = ctx.createImageData(W, H);
   const d = img.data;
   const n = w * h;
+  const colours = new Uint8ClampedArray(n * 3);
   for (let i = 0; i < n; i++) {
     let v = values[offset + i] * scale;
     let from: RGB = PAPER;
@@ -76,17 +70,25 @@ export function paintGrid(
     }
     if (v < 0) v = 0;
     else if (v > 1) v = 1;
-    const j = i * 4;
-    d[j] = from[0] + (to[0] - from[0]) * v;
-    d[j + 1] = from[1] + (to[1] - from[1]) * v;
-    d[j + 2] = from[2] + (to[2] - from[2]) * v;
-    d[j + 3] = 255;
+    v *= alpha; // a faded picture is the same picture with less ink
+    colours[i * 3] = from[0] + (to[0] - from[0]) * v;
+    colours[i * 3 + 1] = from[1] + (to[1] - from[1]) * v;
+    colours[i * 3 + 2] = from[2] + (to[2] - from[2]) * v;
   }
-  sctx.putImageData(img, 0, 0);
-  ctx.imageSmoothingEnabled = false;
-  ctx.globalAlpha = alpha;
-  ctx.drawImage(cv, 0, 0, w, h, dx, dy, dw, dh);
-  ctx.globalAlpha = 1;
+  const col = new Int32Array(W);
+  for (let px = 0; px < W; px++) col[px] = Math.min(w - 1, Math.floor((px * w) / W)) * 3;
+  for (let py = 0; py < H; py++) {
+    const row = Math.min(h - 1, Math.floor((py * h) / H)) * w * 3;
+    let j = py * W * 4;
+    for (let px = 0; px < W; px++, j += 4) {
+      const c = row + col[px];
+      d[j] = colours[c];
+      d[j + 1] = colours[c + 1];
+      d[j + 2] = colours[c + 2];
+      d[j + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, X0, Y0);
 }
 
 export function maxAbs(values: ArrayLike<number>, offset: number, n: number): number {
