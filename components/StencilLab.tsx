@@ -1,177 +1,119 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion } from "motion/react";
-import {
-  BookOpen,
-  Calculator,
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  Dices,
-  Eraser,
-  Pause,
-  Pencil,
-  Play,
-  RotateCcw,
-  Shuffle,
-  StepForward,
-  Trash2,
-  X,
-} from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { BookOpen, Brain as BrainIcon, ChevronRight, Layers, Pause, Play, RotateCcw, Snail, Star, Trash2, X } from "lucide-react";
 import { BATCH, Lab, TEST_SIZE, TRAIN_SIZE, TopExample } from "@/lib/lab";
-import {
-  C1,
-  Cache,
-  F1,
-  F2,
-  GradCheckRow,
-  HOT_SIZE,
-  HotSpot,
-  K1,
-  createCache,
-  forward,
-  gradientCheck,
-  hotSpot,
-} from "@/lib/net";
-import { RNG, seedFromText } from "@/lib/rng";
-import { CLASS_NAMES, FULL_VARIETY, GRID, PIXELS, Variety, eraseSegment, generateShape, stampSegment } from "@/lib/shapes";
+import { C1, Cache, F1, F2, HOT_SIZE, HotSpot, K1, createCache, backward, forward, hotSpot, previewNudge, zerosLike } from "@/lib/net";
+import { RNG } from "@/lib/rng";
+import { CLASS_NAMES, FULL_VARIETY, GRID, PIXELS, Variety, generateStar, stampSegment } from "@/lib/shapes";
 import { drawChart, maxAbs, paintGrid, prepare, strokeHotSpot } from "@/lib/draw";
+import { IDEAS, NUDGE_ZOOM, STAGES, TEXT, betText, stageText, sumText } from "@/lib/ideas";
 import { ShapeIcon } from "./icons";
+import BrainView from "./BrainView";
+import CardBrowser from "./CardBrowser";
 
 const PAD = 280;
 const CELL = PAD / GRID;
-const STENCIL_PX = 56;
-const MAP_PX = 84;
+const ROW_W = 152;
+const ROW_H = 84;
 const MINI_PX = 64;
 const THUMB_PX = 31;
-const BATCH_T = 30;
-const BATCH_GAP = 5;
-const BATCH_COLS = 8;
-const DEFAULT_LR = 0.1;
+const TICK = 24;
 const LR_MIN = 0.005;
 const LR_MAX = 0.5;
-
 const lrFromSlider = (s: number) => LR_MIN * Math.pow(LR_MAX / LR_MIN, s / 100);
 const sliderFromLr = (lr: number) => (100 * Math.log(lr / LR_MIN)) / Math.log(LR_MAX / LR_MIN);
 
+type Kind = "practice" | "test" | "drawn" | "star";
+interface Card {
+  x: Float64Array;
+  label: number | null;
+  kind: Kind;
+}
+/** Everything slow-mo worked out for its one card. Nothing here is written back to the brain. */
+interface Slow {
+  label: number;
+  probs: number[];
+  blameAnswer: number[];
+  blame2: number[];
+  blame1: number[];
+  before: Float64Array;
+  change: Float64Array; // the real change to the layer-1 knobs for this one card
+  most: number;
+}
 interface Stats {
   step: number;
-  examples: number;
+  cards: number;
   acc: number | null;
   wide: number | null;
   loss: number | null;
-  ms: number;
-  reachedMs: number | null;
-  guess: number;
-  confidence: number;
+  probs: number[];
   blank: boolean;
   narrow: boolean;
-  nClasses: number;
 }
 
-type Pop = { kind: "stencil" | "unit"; index: number; pinned: boolean; left: number; top: number };
-
-type Zone = "A" | "B" | "C" | "D" | "strip";
-
-const STORY: { text: string; zones: Zone[]; focus?: "train" | "variety"; tip: string }[] = [
-  {
-    text: "These 8 stencils are random speckle. Nobody has told them what to look for.",
-    zones: ["B"],
-    tip: "Each stencil is a 5 by 5 grid of knobs. Orange knobs like ink, blue knobs like empty space.",
-  },
-  {
-    text: "Press Train. Each wrong answer nudges every stencil a tiny bit.",
-    zones: ["strip", "B"],
-    focus: "train",
-    tip: "Watch “how wrong” fall and the test score climb while the stencils shimmer.",
-  },
-  {
-    text: "Look: some stencils are turning into lines. Lines turned out to be useful.",
-    zones: ["B"],
-    tip: "Nobody drew those stripes. They grew out of practice on 1,500 labelled shapes.",
-  },
-  {
-    text: "Draw a triangle. See which stencils light up along its sides?",
-    zones: ["A", "B"],
-    tip: "Hover over a stencil to see exactly where it fires on your drawing.",
-  },
-  {
-    text: "Now turn on “centred only” and Reset. What happens when it only ever sees one kind of shape?",
-    zones: ["strip", "A"],
-    focus: "variety",
-    tip: "Train again, then draw a shape in a corner of the pad. The purple line shows the score on shapes it never practised.",
-  },
-];
-
-function formatTime(ms: number): string {
-  const s = ms / 1000;
-  return s < 10 ? `${s.toFixed(1)} s` : `${Math.round(s)} s`;
+/** A number on screen, with its one-line hover note. */
+function N({ note, children, className }: { note: string; children: React.ReactNode; className?: string }) {
+  return (
+    <span className={`n ${className ?? ""}`} title={note}>
+      {children}
+    </span>
+  );
 }
+
+const PANEL_IDEA: Record<string, number> = { A: 1, B: 7, C: 4, D: 3 };
+const STORY_PANELS = ["A", "A", "D", "ABCD", "D", "B", "B"];
 
 export default function StencilLab() {
   // ---- things that change every frame live in refs, not React state ----------------------
   const labRef = useRef<Lab | null>(null);
-  const drawing = useRef<Float64Array>(new Float64Array(PIXELS));
+  const card = useRef<Card>({ x: new Float64Array(PIXELS), label: null, kind: "drawn" });
   const view = useRef<Cache | null>(null);
   const dirty = useRef(true);
-  const seen = useRef({ version: -1, top: null as TopExample[][] | null, step: -1, accLen: -1, batchStep: -2 });
+  const seen = useRef({ version: -1, top: null as TopExample[][] | null, step: -1, accLen: -1 });
   const runningRef = useRef(false);
-  const lrRef = useRef(DEFAULT_LR);
-  const popRef = useRef<Pop | null>(null);
-  const hoverUnit = useRef<number | null>(null);
-  const padHover = useRef<[number, number] | null>(null);
-  const slideText = useRef<HTMLSpanElement | null>(null);
+  const lrRef = useRef(0.1);
+  const slowRef = useRef<Slow | null>(null);
+  const stageRef = useRef(0);
   const lastStats = useRef(0);
   const lastFrame = useRef(0);
-  const celebrated = useRef(false);
 
   const padCanvas = useRef<HTMLCanvasElement | null>(null);
-  const stencilCanvas = useRef<(HTMLCanvasElement | null)[]>([]);
-  const mapCanvas = useRef<(HTMLCanvasElement | null)[]>([]);
+  const rowCanvas = useRef<(HTMLCanvasElement | null)[]>([]);
   const miniCanvas = useRef<(HTMLCanvasElement | null)[]>([]);
   const topCanvas = useRef<(HTMLCanvasElement | null)[]>([]);
-  const strengthBar = useRef<(HTMLDivElement | null)[]>([]);
-  const unitCard = useRef<(HTMLButtonElement | null)[]>([]);
-  const barFill = useRef<(HTMLDivElement | null)[]>([]);
+  const strength = useRef<(HTMLSpanElement | null)[]>([]);
+  const barFill = useRef<(HTMLSpanElement | null)[]>([]);
   const barText = useRef<(HTMLSpanElement | null)[]>([]);
-  const barRow = useRef<(HTMLDivElement | null)[]>([]);
   const lossCanvas = useRef<HTMLCanvasElement | null>(null);
   const accCanvas = useRef<HTMLCanvasElement | null>(null);
-  const batchCanvas = useRef<HTMLCanvasElement | null>(null);
-  const popStencil = useRef<HTMLCanvasElement | null>(null);
-  const popMap = useRef<HTMLCanvasElement | null>(null);
-  const popUnit = useRef<HTMLCanvasElement | null>(null);
-  const popTops = useRef<HTMLCanvasElement | null>(null);
+  const tickCanvas = useRef<HTMLCanvasElement | null>(null);
+  const stripCanvas = useRef<HTMLCanvasElement | null>(null);
 
   // ---- React state: controls and slow-changing read-outs ---------------------------------
   const [ready, setReady] = useState(false);
   const [running, setRunning] = useState(false);
-  const [slider, setSlider] = useState(() => sliderFromLr(DEFAULT_LR));
-  const [seedText, setSeedText] = useState("7");
+  const [slider, setSlider] = useState(() => sliderFromLr(0.1));
   const [variety, setVariety] = useState<Variety>({ ...FULL_VARIETY });
-  const [lineClass, setLineClass] = useState(false);
-  const [applied, setApplied] = useState({ seed: "7", variety: { ...FULL_VARIETY }, lineClass: false });
+  const [applied, setApplied] = useState<Variety>({ ...FULL_VARIETY });
   const [stats, setStats] = useState<Stats | null>(null);
-  const [pop, setPop] = useState<Pop | null>(null);
-  const [erasing, setErasing] = useState(false);
+  const [info, setInfo] = useState<{ label: number | null; kind: Kind }>({ label: null, kind: "drawn" });
+  const [flipped, setFlipped] = useState(false);
+  const [stage, setStage] = useState(0);
+  const [slow, setSlow] = useState<Slow | null>(null);
+  const [idea, setIdea] = useState(1);
   const [story, setStory] = useState<number | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
-  const [mathRows, setMathRows] = useState<GradCheckRow[] | null>(null);
-  const [resetCount, setResetCount] = useState(0);
-  const [report, setReport] = useState<number[] | null>(null);
+  const [did, setDid] = useState<Record<string, boolean>>({});
+  const [modal, setModal] = useState<"brain" | "cards" | null>(null);
+  const [strip, setStrip] = useState<number[]>([0, 1, 2, 3, 4]);
 
   const lr = lrFromSlider(slider);
   lrRef.current = lr;
   runningRef.current = running;
-  popRef.current = pop;
-
-  const needsReset =
-    seedText.trim() !== applied.seed ||
-    lineClass !== applied.lineClass ||
-    variety.centredOnly !== applied.variety.centredOnly ||
-    variety.noRotation !== applied.variety.noRotation ||
-    variety.outlinesOnly !== applied.variety.outlinesOnly;
+  stageRef.current = stage;
+  slowRef.current = slow;
+  const mark = (k: string) => setDid((d) => (d[k] ? d : { ...d, [k]: true }));
+  const needsReset = (Object.keys(variety) as (keyof Variety)[]).some((k) => variety[k] !== applied[k]);
 
   // ---- drawing everything ---------------------------------------------------------------
   const render = useCallback(() => {
@@ -179,35 +121,20 @@ export default function StencilLab() {
     const cache = view.current;
     if (!lab || !cache) return;
     const net = lab.net;
-    const x = drawing.current;
-    const p = popRef.current;
+    const x = card.current.x;
+    const s = stageRef.current === 5 ? slowRef.current : null;
 
-    // layer-2 hot spots for the current drawing
     const spots: HotSpot[] = [];
     let maxScore = 1e-9;
     for (let u = 0; u < F2; u++) {
-      const h = hotSpot(cache, u);
-      spots.push(h);
-      if (h.score > maxScore) maxScore = h.score;
+      spots.push(hotSpot(cache, u));
+      maxScore = Math.max(maxScore, spots[u].score);
     }
 
-    // A. drawing pad
+    // A. the card on the pad
     if (padCanvas.current) {
       const ctx = prepare(padCanvas.current, PAD, PAD);
       paintGrid(ctx, x, 0, GRID, GRID, 1, "ink", 0, 0, PAD, PAD);
-      // where the hovered stencil fired, painted over the drawing
-      if (p && p.kind === "stencil") {
-        const base = p.index * C1 * C1;
-        const m = maxAbs(cache.a1, base, C1 * C1) || 1;
-        ctx.fillStyle = "rgb(242,125,22)";
-        for (let i = 0; i < C1 * C1; i++) {
-          const v = cache.a1[base + i] / m;
-          if (v < 0.06) continue;
-          ctx.globalAlpha = Math.min(0.9, Math.sqrt(v));
-          ctx.fillRect(((i % C1) + 2) * CELL, (Math.floor(i / C1) + 2) * CELL, CELL, CELL);
-        }
-        ctx.globalAlpha = 1;
-      }
       ctx.strokeStyle = "rgba(31,42,68,0.07)";
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -218,389 +145,313 @@ export default function StencilLab() {
         ctx.lineTo(PAD, i * CELL + 0.5);
       }
       ctx.stroke();
-      // slide the pinned stencil by hand: show its 5x5 window under the pointer and the points it scores there
-      if (p && p.kind === "stencil" && p.pinned) {
-        const hover = padHover.current;
-        let message = "Move your pointer over the pad to slide this stencil by hand.";
-        if (hover) {
-          const wx = Math.max(0, Math.min(C1 - 1, Math.floor(hover[0]) - 2));
-          const wy = Math.max(0, Math.min(C1 - 1, Math.floor(hover[1]) - 2));
-          const f = p.index;
-          const m = maxAbs(net.W1, f * 25, 25) || 1;
-          let points = net.b1[f];
-          for (let ky = 0; ky < K1; ky++)
-            for (let kx = 0; kx < K1; kx++) {
-              const w = net.W1[f * 25 + ky * K1 + kx];
-              points += w * x[(wy + ky) * GRID + wx + kx];
-              const a = Math.abs(w) / m;
-              ctx.fillStyle = w >= 0 ? `rgba(242,125,22,${0.55 * a})` : `rgba(38,104,222,${0.55 * a})`;
-              ctx.fillRect((wx + kx) * CELL, (wy + ky) * CELL, CELL, CELL);
-            }
-          ctx.strokeStyle = "#1f2a44";
-          ctx.lineWidth = 2.5;
-          ctx.strokeRect(wx * CELL, wy * CELL, K1 * CELL, K1 * CELL);
-          message =
-            points > 0
-              ? `Here it scores ${points.toFixed(2)} points.`
-              : `Here it scores ${points.toFixed(2)}, which is squashed to 0 points.`;
-        }
-        if (slideText.current) slideText.current.textContent = message;
-      }
-      const hu = p && p.kind === "unit" ? p.index : hoverUnit.current;
-      if (hu !== null && spots[hu].score > 0) strokeHotSpot(ctx, spots[hu].x, spots[hu].y, HOT_SIZE, CELL, 0, 0, 3);
     }
 
-    // B. layer-1 stencils and where each one fired
+    // B. each stencil and where it fired; in slow-mo stage 5: before + change = after
     const a1Max = maxAbs(cache.a1, 0, cache.a1.length) || 1;
-    for (let f = 0; f < F1; f++) {
-      const sc = stencilCanvas.current[f];
-      if (sc) {
-        const ctx = prepare(sc, STENCIL_PX, STENCIL_PX);
-        const m = maxAbs(net.W1, f * 25, 25) || 1;
-        paintGrid(ctx, net.W1, f * 25, K1, K1, 1 / m, "heat", 0, 0, STENCIL_PX, STENCIL_PX);
-        ctx.strokeStyle = "rgba(255,255,255,0.75)";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        for (let i = 1; i < K1; i++) {
-          const q = (i * STENCIL_PX) / K1;
-          ctx.moveTo(q, 0);
-          ctx.lineTo(q, STENCIL_PX);
-          ctx.moveTo(0, q);
-          ctx.lineTo(STENCIL_PX, q);
-        }
-        ctx.stroke();
+    const changeMax = s ? maxAbs(s.change, 0, s.change.length) || 1 : 1;
+    const grid = (ctx: CanvasRenderingContext2D, v: ArrayLike<number>, off: number, scale: number, px: number, py: number, size: number) => {
+      paintGrid(ctx, v, off, K1, K1, scale, "heat", px, py, size, size);
+      ctx.strokeStyle = "rgba(255,255,255,0.75)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 1; i < K1; i++) {
+        const q = (i * size) / K1;
+        ctx.moveTo(px + q, py);
+        ctx.lineTo(px + q, py + size);
+        ctx.moveTo(px, py + q);
+        ctx.lineTo(px + size, py + q);
       }
-      const mc = mapCanvas.current[f];
-      if (mc) {
-        const ctx = prepare(mc, MAP_PX, MAP_PX);
-        paintGrid(ctx, cache.a1, f * C1 * C1, C1, C1, 1 / a1Max, "fire", 0, 0, MAP_PX, MAP_PX);
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(31,42,68,0.25)";
+      ctx.strokeRect(px + 0.5, py + 0.5, size - 1, size - 1);
+    };
+    for (let f = 0; f < F1; f++) {
+      const cv = rowCanvas.current[f];
+      if (!cv) continue;
+      const ctx = prepare(cv, ROW_W, ROW_H);
+      ctx.clearRect(0, 0, ROW_W, ROW_H);
+      ctx.fillStyle = "rgba(31,42,68,0.6)";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      if (s) {
+        const after = new Float64Array(25);
+        for (let i = 0; i < 25; i++) after[i] = s.before[f * 25 + i] + s.change[f * 25 + i] * NUDGE_ZOOM;
+        const m = Math.max(maxAbs(s.before, f * 25, 25), maxAbs(after, 0, 25)) || 1;
+        grid(ctx, s.before, f * 25, 1 / m, 0, 8, 44);
+        grid(ctx, s.change, f * 25, 1 / changeMax, 54, 8, 44);
+        grid(ctx, after, 0, 1 / m, 108, 8, 44);
+        ctx.font = "800 13px Nunito Variable, Nunito, sans-serif";
+        ctx.fillText("+", 49, 30);
+        ctx.fillText("=", 103, 30);
+        ctx.font = "700 10px Nunito Variable, Nunito, sans-serif";
+        ctx.fillText("before", 22, 64);
+        ctx.fillText(`change ×${NUDGE_ZOOM}`, 76, 64);
+        ctx.fillText("after", 130, 64);
+      } else {
+        grid(ctx, net.W1, f * 25, 1 / (maxAbs(net.W1, f * 25, 25) || 1), 0, 14, 56);
+        ctx.font = "800 13px Nunito Variable, Nunito, sans-serif";
+        ctx.fillText("→", 62, 42);
+        paintGrid(ctx, cache.a1, f * C1 * C1, C1, C1, 1 / a1Max, "fire", 68, 0, 84, 84);
+        ctx.strokeStyle = "rgba(31,42,68,0.2)";
+        ctx.strokeRect(68.5, 0.5, 83, 83);
       }
     }
 
-    // C. layer-2 cards: where each unit fired on the current drawing
+    // C. stencils of stencils: the patch of this card that excited each unit
     for (let u = 0; u < F2; u++) {
       const mc = miniCanvas.current[u];
       const h = spots[u];
       if (mc) {
         const ctx = prepare(mc, MINI_PX, MINI_PX);
-        paintGrid(ctx, x, 0, GRID, GRID, 1, "ink", 0, 0, MINI_PX, MINI_PX, h.score > 0 ? 1 : 0.45);
+        paintGrid(ctx, x, 0, GRID, GRID, 1, "ink", 0, 0, MINI_PX, MINI_PX, h.score > 0 ? 1 : 0.4);
         if (h.score > 0) strokeHotSpot(ctx, h.x, h.y, HOT_SIZE, MINI_PX / GRID, 0, 0, 2);
       }
-      const bar = strengthBar.current[u];
+      const bar = strength.current[u];
       if (bar) bar.style.width = `${Math.round((h.score / maxScore) * 100)}%`;
-      const card = unitCard.current[u];
-      if (card) card.dataset.quiet = h.score > 0 ? "false" : "true";
     }
 
-    // D. the answer
-    for (let c = 0; c < lab.nClasses; c++) {
-      const fill = barFill.current[c];
-      const text = barText.current[c];
-      const pct = cache.probs[c] * 100;
-      if (fill) fill.style.width = `${pct}%`;
-      if (text) text.textContent = `${Math.round(pct)}%`;
-    }
-
-    // enlarged views
-    if (p && p.kind === "stencil") {
-      const f = p.index;
-      if (popStencil.current) {
-        const S = 200;
-        const ctx = prepare(popStencil.current, S, S);
-        const m = maxAbs(net.W1, f * 25, 25) || 1;
-        paintGrid(ctx, net.W1, f * 25, K1, K1, 1 / m, "heat", 0, 0, S, S);
-        const q = S / K1;
-        ctx.strokeStyle = "rgba(255,255,255,0.9)";
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        for (let i = 1; i < K1; i++) {
-          ctx.moveTo(i * q, 0);
-          ctx.lineTo(i * q, S);
-          ctx.moveTo(0, i * q);
-          ctx.lineTo(S, i * q);
-        }
-        ctx.stroke();
-        if (p.pinned) {
-          ctx.font = "700 12.5px Nunito Variable, Nunito, system-ui, sans-serif";
-          ctx.textAlign = "center";
-          ctx.textBaseline = "middle";
-          for (let i = 0; i < 25; i++) {
-            const w = net.W1[f * 25 + i];
-            ctx.fillStyle = Math.abs(w) / m > 0.6 ? "#fff" : "rgba(31,42,68,0.9)";
-            ctx.fillText(w.toFixed(2), (i % 5) * q + q / 2, Math.floor(i / 5) * q + q / 2 + 1);
-          }
-        }
-      }
-      if (popMap.current) {
-        const S = 196;
-        const c = S / GRID;
-        const ctx = prepare(popMap.current, S, S);
-        paintGrid(ctx, x, 0, GRID, GRID, 0.28, "ink", 0, 0, S, S);
-        const base = f * C1 * C1;
-        const m = maxAbs(cache.a1, base, C1 * C1) || 1;
-        ctx.fillStyle = "rgb(242,125,22)";
-        for (let i = 0; i < C1 * C1; i++) {
-          const v = cache.a1[base + i] / m;
-          if (v < 0.04) continue;
-          ctx.globalAlpha = Math.min(0.95, Math.sqrt(v));
-          ctx.fillRect(((i % C1) + 2) * c, (Math.floor(i / C1) + 2) * c, c, c);
-        }
-        ctx.globalAlpha = 1;
-      }
-    }
-    if (p && p.kind === "unit") {
-      const u = p.index;
-      if (popUnit.current) {
-        const S = 196;
-        const ctx = prepare(popUnit.current, S, S);
-        paintGrid(ctx, x, 0, GRID, GRID, 1, "ink", 0, 0, S, S);
-        if (spots[u].score > 0) strokeHotSpot(ctx, spots[u].x, spots[u].y, HOT_SIZE, S / GRID, 0, 0, 3);
-      }
-      if (popTops.current) {
-        const T = 84;
-        const gap = 8;
-        const ctx = prepare(popTops.current, T * 4 + gap * 3, T);
-        ctx.clearRect(0, 0, T * 4 + gap * 3, T);
-        lab.top[u].forEach((t, k) => {
-          const ox = k * (T + gap);
-          paintGrid(ctx, lab.train.x[t.index], 0, GRID, GRID, 1, "ink", ox, 0, T, T);
-          strokeHotSpot(ctx, t.hx, t.hy, HOT_SIZE, T / GRID, ox, 0, 2);
-        });
-      }
+    // D. the judge shares out 100%
+    for (let c = 0; c < 3; c++) {
+      if (barFill.current[c]) barFill.current[c]!.style.width = `${cache.probs[c] * 100}%`;
+      if (barText.current[c]) barText.current[c]!.textContent = `${Math.round(cache.probs[c] * 100)}%`;
     }
   }, []);
 
-  const renderTops = useCallback(() => {
+  const thumb = (ctx: CanvasRenderingContext2D, x: Float64Array, ox: number, oy: number, size: number) =>
+    paintGrid(ctx, x, 0, GRID, GRID, 1, "ink", ox, oy, size, size);
+
+  const renderSlowParts = useCallback(() => {
     const lab = labRef.current;
     if (!lab) return;
-    const gap = 2;
-    const S = THUMB_PX * 2 + gap;
+    // favourites of each layer-2 unit
+    const S = THUMB_PX * 2 + 2;
     for (let u = 0; u < F2; u++) {
       const cv = topCanvas.current[u];
       if (!cv) continue;
       const ctx = prepare(cv, S, S);
       ctx.clearRect(0, 0, S, S);
       for (let k = 0; k < 4; k++) {
-        const ox = (k % 2) * (THUMB_PX + gap);
-        const oy = Math.floor(k / 2) * (THUMB_PX + gap);
+        const ox = (k % 2) * (THUMB_PX + 2);
+        const oy = Math.floor(k / 2) * (THUMB_PX + 2);
         const t = lab.top[u][k];
         if (!t) {
           ctx.fillStyle = "rgba(31,42,68,0.05)";
           ctx.fillRect(ox, oy, THUMB_PX, THUMB_PX);
           continue;
         }
-        paintGrid(ctx, lab.train.x[t.index], 0, GRID, GRID, 1, "ink", ox, oy, THUMB_PX, THUMB_PX);
+        thumb(ctx, lab.train.x[t.index], ox, oy, THUMB_PX);
         strokeHotSpot(ctx, t.hx, t.hy, HOT_SIZE, THUMB_PX / GRID, ox, oy, 1.5);
       }
     }
-  }, []);
-
-  const renderCharts = useCallback(() => {
-    const lab = labRef.current;
-    if (!lab) return;
+    // charts
     const xMax = Math.max(200, Math.ceil((lab.step + 1) / 200) * 200);
     if (lossCanvas.current) {
       const w = lossCanvas.current.clientWidth;
       const h = lossCanvas.current.clientHeight;
-      const ctx = prepare(lossCanvas.current, w, h);
-      const top = lab.nClasses === 4 ? 1.6 : 1.4;
       drawChart(
-        ctx,
+        prepare(lossCanvas.current, w, h),
         w,
         h,
         [
           { ys: lab.lossHistory, color: "#f27d16", width: 1, alpha: 0.22 },
           { ys: lab.lossSmooth, color: "#e2560d", width: 2.5, dots: true },
         ],
-        { xMax, yMin: 0, yMax: top, yTicks: [0, 0.5, 1], yFormat: (v) => v.toFixed(1), xLabel: "steps" },
+        { xMax, yMin: 0, yMax: 1.4, yTicks: [0, 0.5, 1], yFormat: (v) => v.toFixed(1), xLabel: "nudges", goal: { y: 1.1, label: "wild guess 1.1", color: "138,79,211" } },
       );
     }
     if (accCanvas.current) {
       const w = accCanvas.current.clientWidth;
       const h = accCanvas.current.clientHeight;
-      const ctx = prepare(accCanvas.current, w, h);
       const xs = lab.accHistory.map((a) => a.step);
       const series = [];
-      if (lab.narrow)
-        series.push({ ys: lab.accHistory.map((a) => a.wide * 100), xs, color: "#8a4fd3", width: 2, dash: [5, 4], dots: true });
+      if (lab.narrow) series.push({ ys: lab.accHistory.map((a) => a.wide * 100), xs, color: "#8a4fd3", width: 2, dash: [5, 4], dots: true });
       series.push({ ys: lab.accHistory.map((a) => a.acc * 100), xs, color: "#0f9d8a", width: 2.5, dots: true });
-      drawChart(ctx, w, h, series, {
-        xMax,
-        yMin: 0,
-        yMax: 100,
-        yTicks: [0, 50, 100],
-        yFormat: (v) => `${v}%`,
-        goal: { y: 85, label: "goal 85%" },
-        xLabel: "steps",
-      });
+      drawChart(prepare(accCanvas.current, w, h), w, h, series, { xMax, yMin: 0, yMax: 100, yTicks: [0, 50, 100], yFormat: (v) => `${v}%`, xLabel: "nudges" });
     }
-  }, []);
-
-  const renderBatch = useCallback(() => {
-    const lab = labRef.current;
-    const cv = batchCanvas.current;
-    if (!lab || !cv) return;
-    const T = BATCH_T;
-    const gap = BATCH_GAP;
-    const cols = BATCH_COLS;
-    const W = cols * T + (cols - 1) * gap;
-    const H = 2 * (T + 6) + gap;
-    const ctx = prepare(cv, W, H);
-    ctx.clearRect(0, 0, W, H);
-    for (let k = 0; k < BATCH; k++) {
-      const item = lab.lastBatch[k];
-      const index = item ? item.index : k;
-      const ox = (k % cols) * (T + gap);
-      const oy = Math.floor(k / cols) * (T + 6 + gap);
-      paintGrid(ctx, lab.train.x[index], 0, GRID, GRID, 1, "ink", ox, oy, T, T);
-      if (item) {
-        ctx.fillStyle = item.guess === item.label ? "#0f9d8a" : "#e5484d";
-        ctx.fillRect(ox, oy + T + 2, T, 3);
+    // ticker: the 16 cards it just practised on, with ticks and crosses
+    if (tickCanvas.current) {
+      const W = BATCH * (TICK + 4) - 4;
+      const ctx = prepare(tickCanvas.current, W, TICK + 14);
+      ctx.clearRect(0, 0, W, TICK + 14);
+      ctx.font = "900 12px Nunito Variable, Nunito, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      for (let k = 0; k < BATCH; k++) {
+        const item = lab.lastBatch[k];
+        const ox = k * (TICK + 4);
+        if (!item) {
+          ctx.fillStyle = "rgba(31,42,68,0.06)";
+          ctx.fillRect(ox, 0, TICK, TICK);
+          continue;
+        }
+        thumb(ctx, lab.train.x[item.index], ox, 0, TICK);
+        const ok = item.guess === item.label;
+        ctx.fillStyle = ok ? "#0f9d8a" : "#e5484d";
+        ctx.fillText(ok ? "✓" : "✗", ox + TICK / 2, TICK + 8);
       }
     }
   }, []);
 
+  // the strip of practice cards in panel A, each with its label underneath
+  useEffect(() => {
+    const lab = labRef.current;
+    const cv = stripCanvas.current;
+    if (!lab || !cv) return;
+    const ctx = prepare(cv, 5 * 56 - 6, 50);
+    ctx.clearRect(0, 0, 5 * 56, 50);
+    strip.forEach((index, k) => thumb(ctx, lab.train.x[index], k * 56, 0, 50));
+  }, [strip, ready]);
+
+  const putOnPad = useCallback((x: Float64Array, label: number | null, kind: Kind) => {
+    card.current = { x, label, kind };
+    setInfo({ label, kind });
+    setFlipped(false);
+    dirty.current = true;
+  }, []);
+
   // ---- the animation loop: a little training, then redraw ------------------------------
   useEffect(() => {
-    const lab = new Lab({ seed: seedFromText("7"), variety: { ...FULL_VARIETY }, lineClass: false });
+    const lab = new Lab();
     labRef.current = lab;
     // every knob is inspectable: try `stencilLab.net.W1` in the browser console
     (window as unknown as { stencilLab: Lab }).stencilLab = lab;
-    view.current = createCache(lab.nClasses);
-    drawing.current = generateShape(new RNG(4), 0, { centredOnly: true, noRotation: true, outlinesOnly: true }).map((v) =>
-      v > 0.2 ? v : 0,
-    );
+    view.current = createCache(3);
+    putOnPad(Float64Array.from(lab.train.x[0]), lab.train.y[0], "practice");
     setReady(true);
 
     let raf = 0;
     const frame = (now: number) => {
       raf = requestAnimationFrame(frame);
-      const L = labRef.current;
-      const cache = view.current;
-      if (!L || !cache) return;
+      const cache = view.current!;
       const s = seen.current;
-      // practice time is measured by the clock on the wall, the way a learner would time it
-      if (runningRef.current) L.trainMs += Math.min(100, now - lastFrame.current);
+      if (runningRef.current) lab.trainMs += Math.min(100, now - lastFrame.current);
       lastFrame.current = now;
-      if (runningRef.current || L.busy) L.advance(runningRef.current ? 11 : 8, runningRef.current, lrRef.current);
+      if (runningRef.current || lab.busy) lab.advance(runningRef.current ? 11 : 8, runningRef.current, lrRef.current);
 
-      if (L.version !== s.version || dirty.current) {
-        s.version = L.version;
+      if (lab.version !== s.version || dirty.current) {
+        s.version = lab.version;
         dirty.current = false;
-        forward(L.net, drawing.current, cache);
+        forward(lab.net, card.current.x, cache);
         render();
       }
-      if (L.top !== s.top) {
-        s.top = L.top;
-        renderTops();
-        dirty.current = true; // the enlarged view may be showing these
-      }
-      if (L.step !== s.step || L.accHistory.length !== s.accLen) {
-        s.step = L.step;
-        if (s.accLen !== L.accHistory.length) setReport(Array.from(L.confusion));
-        s.accLen = L.accHistory.length;
-        renderCharts();
-        renderBatch();
+      if (lab.top !== s.top || lab.step !== s.step || lab.accHistory.length !== s.accLen) {
+        s.top = lab.top;
+        s.step = lab.step;
+        s.accLen = lab.accHistory.length;
+        renderSlowParts();
       }
       if (now - lastStats.current > 140) {
         lastStats.current = now;
-        const acc = L.latestAcc;
+        const acc = lab.latestAcc;
         let ink = 0;
-        for (let i = 0; i < PIXELS; i++) ink += drawing.current[i];
-        let guess = 0;
-        for (let c = 1; c < L.nClasses; c++) if (cache.probs[c] > cache.probs[guess]) guess = c;
+        for (let i = 0; i < PIXELS; i++) ink += card.current.x[i];
         setStats({
-          step: L.step,
-          examples: L.examplesSeen,
+          step: lab.step,
+          cards: lab.cardsSeen,
           acc: acc ? acc.acc : null,
           wide: acc ? acc.wide : null,
-          loss: L.lossSmooth.length ? L.lossSmooth[L.lossSmooth.length - 1] : null,
-          ms: L.trainMs,
-          reachedMs: L.reached85Ms,
-          guess,
-          confidence: cache.probs[guess],
+          loss: lab.lossSmooth.length ? lab.lossSmooth[lab.lossSmooth.length - 1] : null,
+          probs: Array.from(cache.probs),
           blank: ink < 4,
-          narrow: L.narrow,
-          nClasses: L.nClasses,
+          narrow: lab.narrow,
         });
-        if (L.reached85Ms !== null && !celebrated.current) {
-          celebrated.current = true;
-          setToast(`Passed 85% after ${formatTime(L.reached85Ms)} of practice!`);
-          window.setTimeout(() => setToast(null), 5000);
-        }
+        if (lab.lastBatch.length && lab.step % 8 === 0) setStrip(lab.lastBatch.slice(0, 5).map((b) => b.index));
       }
     };
     raf = requestAnimationFrame(frame);
-    return () => cancelAnimationFrame(raf);
-  }, [render, renderTops, renderCharts, renderBatch]);
+    const resize = () => {
+      seen.current.step = -1;
+      dirty.current = true;
+    };
+    window.addEventListener("resize", resize);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", resize);
+    };
+  }, [render, renderSlowParts, putOnPad]);
 
-  // redraw whenever something React-driven changes what the canvases should show
   useEffect(() => {
     dirty.current = true;
-    seen.current.top = null;
     seen.current.step = -1;
-  }, [pop, ready, resetCount, stats?.nClasses]);
+  }, [stage, slow, modal]);
 
   // ---- actions --------------------------------------------------------------------------
-  const doReset = useCallback(
-    (seedOverride?: string) => {
+  const stopSlow = useCallback(() => {
+    setStage(0);
+    setSlow(null);
+  }, []);
+
+  /** Slow-mo: work everything out for one card on a side copy of the sums. The brain itself is not touched. */
+  const startSlow = useCallback(
+    (x?: Float64Array, label?: number) => {
       const lab = labRef.current;
-      if (!lab) return;
-      const seed = (seedOverride ?? seedText).trim() || "7";
+      const cache = view.current;
+      if (!lab || !cache) return;
       setRunning(false);
-      lab.reset({ seed: seedFromText(seed), variety: { ...variety }, lineClass });
-      view.current = createCache(lab.nClasses);
-      celebrated.current = false;
-      setSeedText(seed);
-      setApplied({ seed, variety: { ...variety }, lineClass });
-      setMathRows(null);
-      setToast(null);
-      setResetCount((n) => n + 1);
-      dirty.current = true;
+      if (x === undefined || label === undefined) {
+        const i = Math.floor(Math.random() * TRAIN_SIZE);
+        x = lab.train.x[i];
+        label = lab.train.y[i];
+      }
+      putOnPad(Float64Array.from(x), label, "practice");
+      const g = zerosLike(lab.net);
+      forward(lab.net, x, cache);
+      backward(lab.net, cache, label, g); // only fills the side copy `g`
+      const blame2 = Array.from({ length: F2 }, (_, u) => cache.dp2.subarray(u * 25, u * 25 + 25).reduce((a, v) => a + Math.abs(v), 0));
+      const blame1 = Array.from({ length: F1 }, (_, f) => {
+        let sum = 0;
+        for (let j = f * 144; j < (f + 1) * 144; j++) if (cache.p1[j] > 0) sum += Math.abs(cache.dp1[j]);
+        return sum;
+      });
+      const norm = (a: number[]) => a.map((v) => v / (Math.max(...a) || 1));
+      const change = previewNudge(lab.net, g, lrRef.current, 1, "W1");
+      let most = 0;
+      let mostSum = -1;
+      for (let f = 0; f < F1; f++) {
+        const sum = change.subarray(f * 25, f * 25 + 25).reduce((a, v) => a + Math.abs(v), 0);
+        if (sum > mostSum) [most, mostSum] = [f, sum];
+      }
+      setSlow({ label, probs: Array.from(cache.probs), blameAnswer: Array.from(cache.dlogits), blame2: norm(blame2), blame1: norm(blame1), before: Float64Array.from(lab.net.W1), change, most });
+      setStage(1);
+      setIdea(STAGES[0].idea);
+      mark("slowmo");
     },
-    [seedText, variety, lineClass],
+    [putOnPad],
   );
 
-  const doStep = useCallback(() => {
+  const nextStage = () => {
+    const n = stage + 1;
+    setStage(n);
+    setIdea(STAGES[n - 1].idea);
+    mark(`stage${n}`);
+  };
+
+  const train = () => {
+    stopSlow();
+    setRunning(true);
+    setIdea(7);
+    mark("train");
+  };
+
+  const reset = () => {
     const lab = labRef.current;
     if (!lab) return;
+    stopSlow();
     setRunning(false);
-    lab.flush();
-    lab.trainStep(lrRef.current);
-  }, []);
+    lab.reset({ ...variety });
+    setApplied({ ...variety });
+    setStrip([0, 1, 2, 3, 4]);
+    putOnPad(Float64Array.from(lab.train.x[0]), lab.train.y[0], "practice");
+    if (variety.centredOnly) mark("centred");
+  };
 
-  const randomShape = useCallback(() => {
-    const lab = labRef.current;
-    if (!lab) return;
-    const rng = new RNG((Math.random() * 2 ** 32) >>> 0);
-    drawing.current = generateShape(rng, rng.int(lab.nClasses), FULL_VARIETY);
-    dirty.current = true;
-  }, []);
-
-  const clearPad = useCallback(() => {
-    drawing.current = new Float64Array(PIXELS);
-    dirty.current = true;
-  }, []);
-
-  const pickBatchShape = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    const lab = labRef.current;
-    if (!lab) return;
-    const r = e.currentTarget.getBoundingClientRect();
-    const col = Math.min(BATCH_COLS - 1, Math.floor((e.clientX - r.left) / (BATCH_T + BATCH_GAP)));
-    const row = Math.min(1, Math.floor((e.clientY - r.top) / (BATCH_T + 6 + BATCH_GAP)));
-    const k = row * BATCH_COLS + col;
-    const index = lab.lastBatch[k] ? lab.lastBatch[k].index : k;
-    drawing.current = Float64Array.from(lab.train.x[index]);
-    dirty.current = true;
-  }, []);
-
-  const runMathCheck = useCallback(() => {
-    const lab = labRef.current;
-    if (!lab) return;
-    const rng = new RNG(lab.step + 1);
-    const i = rng.int(TRAIN_SIZE);
-    setMathRows(gradientCheck(lab.net, lab.train.x[i], lab.train.y[i], rng, 2));
-  }, []);
+  const tryStar = () => {
+    stopSlow();
+    putOnPad(generateStar(new RNG((Math.random() * 2 ** 32) >>> 0)), null, "star");
+    setIdea(3);
+    mark("star");
+  };
 
   // ---- drawing with mouse or finger -----------------------------------------------------
   const lastPoint = useRef<[number, number] | null>(null);
@@ -608,121 +459,42 @@ export default function StencilLab() {
     const r = e.currentTarget.getBoundingClientRect();
     return [((e.clientX - r.left) / r.width) * GRID, ((e.clientY - r.top) / r.height) * GRID];
   };
-  const stroke = (a: [number, number], b: [number, number]) => {
-    if (erasing) eraseSegment(drawing.current, a[0], a[1], b[0], b[1], 4.5);
-    else stampSegment(drawing.current, a[0], a[1], b[0], b[1], 2);
-    dirty.current = true;
-  };
   const onPadDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     e.currentTarget.setPointerCapture(e.pointerId);
+    if (card.current.kind !== "drawn") {
+      stopSlow();
+      putOnPad(new Float64Array(PIXELS), null, "drawn");
+    }
     const p = toGrid(e);
     lastPoint.current = p;
-    stroke(p, p);
+    stampSegment(card.current.x, p[0], p[1], p[0], p[1], 2);
+    dirty.current = true;
   };
   const onPadMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const p = toGrid(e);
-    if (e.pointerType === "mouse") {
-      padHover.current = p;
-      if (popRef.current?.pinned) dirty.current = true;
-    }
     if (!lastPoint.current) return;
-    stroke(lastPoint.current, p);
+    const p = toGrid(e);
+    stampSegment(card.current.x, lastPoint.current[0], lastPoint.current[1], p[0], p[1], 2);
     lastPoint.current = p;
-  };
-  const onPadUp = () => {
-    lastPoint.current = null;
+    dirty.current = true;
   };
 
-  // ---- hover to enlarge, click to pin ---------------------------------------------------
-  const place = (el: HTMLElement, kind: Pop["kind"]): { left: number; top: number } => {
-    const r = el.getBoundingClientRect();
-    const w = kind === "stencil" ? 452 : 400;
-    const h = kind === "stencil" ? 400 : 400;
-    let left = r.right + 14;
-    if (left + w > window.innerWidth - 8) left = r.left - w - 14;
-    if (left < 8) left = Math.max(8, (window.innerWidth - w) / 2);
-    const top = Math.max(8, Math.min(window.innerHeight - h - 8, r.top + r.height / 2 - h / 2));
-    return { left, top };
-  };
-  const hoverIn = (kind: Pop["kind"], index: number) => (e: React.PointerEvent<HTMLElement>) => {
-    if (e.pointerType !== "mouse" || popRef.current?.pinned) return;
-    setPop({ kind, index, pinned: false, ...place(e.currentTarget, kind) });
-  };
-  const hoverOut = () => {
-    if (popRef.current && !popRef.current.pinned) setPop(null);
-  };
-  const togglePin = (kind: Pop["kind"], index: number) => (e: React.MouseEvent<HTMLElement>) => {
-    const cur = popRef.current;
-    if (cur && cur.pinned && cur.kind === kind && cur.index === index) setPop(null);
-    else setPop({ kind, index, pinned: true, ...place(e.currentTarget, kind) });
-  };
-  useEffect(() => {
-    if (!pop?.pinned) return;
-    const close = (e: PointerEvent) => {
-      const t = e.target as HTMLElement;
-      if (!t.closest("[data-pop], [data-pop-anchor]")) setPop(null);
-    };
-    const key = (e: KeyboardEvent) => e.key === "Escape" && setPop(null);
-    window.addEventListener("pointerdown", close);
-    window.addEventListener("keydown", key);
-    return () => {
-      window.removeEventListener("pointerdown", close);
-      window.removeEventListener("keydown", key);
-    };
-  }, [pop?.pinned]);
-
-  // space bar starts and pauses training; resizing the window redraws the charts
-  useEffect(() => {
-    const key = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement;
-      if (e.code !== "Space" || t.closest("input, button, summary, [role=switch]")) return;
-      e.preventDefault();
-      setRunning((r) => !r);
-    };
-    const resize = () => {
-      seen.current.step = -1;
-      dirty.current = true;
-    };
-    window.addEventListener("keydown", key);
-    window.addEventListener("resize", resize);
-    return () => {
-      window.removeEventListener("keydown", key);
-      window.removeEventListener("resize", resize);
-    };
-  }, []);
-
-  // ---- story mode -----------------------------------------------------------------------
-  const storyStep = story !== null ? STORY[story] : null;
-  const zoneClass = (z: Zone) => (storyStep ? (storyStep.zones.includes(z) ? " spot" : " dimmed") : "");
-  const nClasses = stats?.nClasses ?? 3;
-  const classList = useMemo(() => Array.from({ length: nClasses }, (_, i) => i), [nClasses]);
+  // ---- what to say and what to light up -------------------------------------------------
+  const storyIdea = story !== null ? IDEAS[story] : null;
+  const active = IDEAS[(stage ? STAGES[stage - 1].idea : storyIdea ? storyIdea.n : idea) - 1];
+  const storyDone = story === null ? false : [did.flip, true, did.star, did.stage2, did.stage3, did.stage5, did.train && did.centred][story];
+  const lit = stage ? STAGES[stage - 1].panels : story !== null ? STORY_PANELS[story] : "ABCD";
+  const panelClass = (p: string) => `panel ${p.toLowerCase()}${lit.includes(p) ? (lit.length < 4 ? " spot" : "") : " dimmed"}`;
+  const hover = (p: string) => () => !stage && story === null && setIdea(p === "D" && info.label !== null ? 5 : PANEL_IDEA[p]);
+  const probs = stage && slow ? slow.probs : (stats?.probs ?? [1 / 3, 1 / 3, 1 / 3]);
+  const guess = probs.indexOf(Math.max(...probs));
   const trained = (stats?.step ?? 0) > 0;
+  const sum = info.label !== null ? sumText(probs[info.label], info.label) : null;
+  const kindText = { practice: "A practice card", test: "A test card", drawn: "Your own drawing", star: "A star" }[info.kind];
+  const lrWord = lr < 0.02 ? "tiny nudges: slow but steady" : lr < 0.2 ? "medium nudges" : "huge nudges: fast but wobbly";
   const lab = labRef.current;
 
-  let verdict = "Draw a shape!";
-  let verdictNote = "Use your mouse or finger on the pad.";
-  if (stats && !stats.blank) {
-    const name = CLASS_NAMES[stats.guess];
-    const Name = name[0].toUpperCase() + name.slice(1);
-    if (!trained) {
-      verdict = `Wild guess: ${name}`;
-      verdictNote = "No practice yet, so this is like rolling dice.";
-    } else if (stats.confidence > 0.9) {
-      verdict = `${Name}!`;
-      verdictNote = "It is very sure.";
-    } else if (stats.confidence > 0.6) {
-      verdict = `Probably a ${name}`;
-      verdictNote = "Fairly sure, not certain.";
-    } else {
-      verdict = `Maybe a ${name}?`;
-      verdictNote = "It can’t really decide.";
-    }
-  }
-
-  const lrWord = lr < 0.02 ? "tiny nudges: slow but steady" : lr < 0.2 ? "medium nudges" : "huge nudges: fast but wobbly";
-
   return (
-    <div className="lab" data-story={story !== null ? "on" : "off"}>
+    <div className={`lab stage-${stage}`}>
       <header className="top">
         <div className="brand">
           <div className="logo" aria-hidden>
@@ -733,549 +505,440 @@ export default function StencilLab() {
           <div>
             <h1>Shape Stencil Lab</h1>
             <p>
-              Watch a tiny brain teach itself to tell shapes apart. A companion to{" "}
-              <em>From Perceptrons to ChatGPT</em>.
+              Watch a tiny network teach itself to tell triangles, squares and circles apart. A companion to <em>From Perceptrons to ChatGPT</em>.
             </p>
           </div>
         </div>
-        <button className={`btn story-btn${story !== null ? " on" : ""}`} onClick={() => setStory(story === null ? 0 : null)}>
+        <button
+          className={`btn dark${story !== null ? " on" : ""}`}
+          onClick={() => {
+            stopSlow();
+            setStory(story === null ? 0 : null);
+          }}
+        >
           <BookOpen size={18} /> {story === null ? "Story mode" : "Leave story"}
         </button>
       </header>
 
-      <AnimatePresence initial={false}>
-        {storyStep && story !== null && (
-          <motion.section
-            className="story"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.25 }}
-            aria-live="polite"
-          >
-            <div className="story-inner">
-              <div className="story-num">{story + 1}</div>
-              <AnimatePresence mode="wait">
-                <motion.div
-                  key={story}
-                  className="story-text"
-                  initial={{ opacity: 0, x: 16 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: -16 }}
-                  transition={{ duration: 0.18 }}
-                >
-                  <p className="story-line">{storyStep.text}</p>
-                  <p className="story-tip">{storyStep.tip}</p>
-                </motion.div>
-              </AnimatePresence>
-              <div className="story-nav">
-                <div className="dots" aria-hidden>
-                  {STORY.map((_, i) => (
-                    <span key={i} className={i === story ? "on" : ""} />
-                  ))}
-                </div>
-                <button className="btn ghost" disabled={story === 0} onClick={() => setStory(story - 1)}>
-                  <ChevronLeft size={18} /> Back
-                </button>
-                {story < STORY.length - 1 ? (
-                  <button className="btn primary" onClick={() => setStory(story + 1)}>
-                    Next <ChevronRight size={18} />
-                  </button>
-                ) : (
-                  <button className="btn primary" onClick={() => setStory(null)}>
-                    Done <Check size={18} />
-                  </button>
-                )}
-              </div>
-            </div>
-          </motion.section>
-        )}
-      </AnimatePresence>
-
       <main className="panels">
-        {/* ---------------- A ---------------- */}
-        <section className={`panel a${zoneClass("A")}`}>
-          <PanelHead letter="A" title="Drawing pad" tech="input · 28 × 28 pixels" />
-          <div className="pad-wrap">
-            <canvas
-              ref={padCanvas}
-              className={`pad${erasing ? " erasing" : ""}`}
-              style={{ width: PAD, height: PAD }}
-              onPointerDown={onPadDown}
-              onPointerMove={onPadMove}
-              onPointerUp={onPadUp}
-              onPointerCancel={onPadUp}
-              onPointerLeave={() => {
-                padHover.current = null;
-                dirty.current = true;
-              }}
-              aria-label="Drawing pad: draw a shape here"
-            />
+        {/* ---------------- A. Cards ---------------- */}
+        <section className={panelClass("A")} onPointerEnter={hover("A")}>
+          <PanelHead letter="A" title="Cards" tech="input · 28 × 28 dots" />
+          <div className={`flip${flipped ? " flipped" : ""}`}>
+            <div className="face front">
+              <canvas
+                ref={padCanvas}
+                className="pad"
+                style={{ width: PAD, height: PAD }}
+                onPointerDown={onPadDown}
+                onPointerMove={onPadMove}
+                onPointerUp={() => (lastPoint.current = null)}
+                onPointerCancel={() => (lastPoint.current = null)}
+                aria-label="The card on the pad. Draw here to make your own card."
+              />
+            </div>
+            <div className="face back">
+              {info.label !== null ? (
+                <>
+                  <ShapeIcon cls={info.label} size={90} />
+                  <b>{CLASS_NAMES[info.label]}</b>
+                  <small>the label on the back</small>
+                </>
+              ) : (
+                <>
+                  <b>?</b>
+                  <small>{info.kind === "star" ? "Nobody labelled the star." : "Nothing written here: you drew this card."}</small>
+                </>
+              )}
+            </div>
           </div>
           <div className="pad-tools">
-            <button className={`btn small${!erasing ? " on" : ""}`} onClick={() => setErasing(false)} title="Draw">
-              <Pencil size={16} /> Draw
-            </button>
-            <button className={`btn small${erasing ? " on" : ""}`} onClick={() => setErasing(true)} title="Rub out">
-              <Eraser size={16} /> Rub out
-            </button>
-            <button className="btn small" onClick={clearPad}>
-              <Trash2 size={16} /> Clear
-            </button>
-            <button className="btn small" onClick={randomShape}>
-              <Shuffle size={16} /> Random shape
-            </button>
-          </div>
-          <p className="hint pad-hint">
-            Draw a triangle, a square{nClasses === 4 ? ", a circle or a line" : " or a circle"}. Everything to the right
-            updates as you draw.
-          </p>
-          <figure className="batch">
-            <figcaption>
-              {trained ? (
+            <span className="chip">
+              {kindText}
+              {info.label !== null && (
                 <>
-                  Just practised on <small>mini-batch of {BATCH}</small>
+                  {" "}· label: <b>{CLASS_NAMES[info.label]}</b>
                 </>
-              ) : (
-                <>
-                  It will practise on <small>{TRAIN_SIZE.toLocaleString("en-GB")} shapes like these</small>
-                </>
-              )}
-            </figcaption>
-            <canvas
-              ref={batchCanvas}
-              style={{ width: BATCH_COLS * (BATCH_T + BATCH_GAP) - BATCH_GAP, height: 2 * (BATCH_T + 6) + BATCH_GAP }}
-              onClick={pickBatchShape}
-              title="Click a shape to put it on the pad"
-            />
-            <span className="key">
-              {trained ? (
-                <>
-                  <i className="k teal" /> guessed right <i className="k red" /> guessed wrong
-                </>
-              ) : (
-                <>Click one to put it on the pad.</>
               )}
             </span>
-          </figure>
+            <button
+              className={`btn small${story === 0 ? " pulse" : ""}`}
+              onClick={() => {
+                setFlipped(!flipped);
+                setIdea(1);
+                mark("flip");
+              }}
+            >
+              <RotateCcw size={15} /> Flip the card
+            </button>
+            <button
+              className="btn small"
+              onClick={() => {
+                stopSlow();
+                putOnPad(new Float64Array(PIXELS), null, "drawn");
+              }}
+              title="Wipe the pad, then draw your own shape with mouse or finger"
+            >
+              <Trash2 size={15} /> Clear and draw
+            </button>
+          </div>
+
+          <div className="mini-cards">
+            <div className="sub">
+              Practice cards <small>each with its label</small>
+            </div>
+            <canvas
+              ref={stripCanvas}
+              style={{ width: 5 * 56 - 6, height: 50 }}
+              title="Click a card to put it on the pad"
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                const i = strip[Math.min(4, Math.floor((e.clientX - r.left) / 56))];
+                if (lab) {
+                  stopSlow();
+                  putOnPad(Float64Array.from(lab.train.x[i]), lab.train.y[i], "practice");
+                }
+              }}
+            />
+            <div className="labels">{lab && strip.map((i, k) => <span key={k}>{CLASS_NAMES[lab.train.y[i]]}</span>)}</div>
+          </div>
+
+          <div className="versus" onPointerEnter={() => !stage && story === null && setIdea(2)}>
+            <div>
+              <b>Drawer</b>
+              {TEXT.drawer.map((t) => (
+                <span key={t}>{t}</span>
+              ))}
+            </div>
+            <div>
+              <b>Learner</b>
+              {TEXT.learner.map((t) => (
+                <span key={t}>{t}</span>
+              ))}
+            </div>
+          </div>
         </section>
 
-        {/* ---------------- B ---------------- */}
-        <section className={`panel b${zoneClass("B")}`}>
-          <PanelHead letter="B" title="Layer 1: eight stencils" tech="convolution filters · 5 × 5 knobs each" />
+        {/* ---------------- B. Stencils ---------------- */}
+        <section className={panelClass("B")} onPointerEnter={hover("B")}>
+          <PanelHead letter="B" title="Stencils" tech="convolution filters · 8 grids of 5 × 5 knobs" />
           <div className="legend">
-            <span><i className="sw blue" /> wants empty</span>
-            <span><i className="sw white" /> doesn’t care</span>
-            <span><i className="sw orange" /> wants ink</span>
+            <span>
+              <i className="sw blue" /> wants empty
+            </span>
+            <span>
+              <i className="sw orange" /> wants ink
+            </span>
+            {stage === 5 && <b className="zoom">change drawn ×{NUDGE_ZOOM} bigger</b>}
           </div>
           <div className="stencils">
             {Array.from({ length: F1 }, (_, f) => (
-              <button
+              <div
                 key={f}
-                className={`stencil${pop?.kind === "stencil" && pop.index === f ? " active" : ""}`}
-                data-pop-anchor
-                onPointerEnter={hoverIn("stencil", f)}
-                onPointerLeave={hoverOut}
-                onClick={togglePin("stencil", f)}
-                aria-label={`Stencil ${f + 1}: click to see its numbers`}
+                className={`stencil${stage === 5 && slow?.most === f ? " most" : ""}`}
+                style={stage === 4 && slow ? ({ "--blame": slow.blame1[f] } as React.CSSProperties) : undefined}
+                title={
+                  stage === 5
+                    ? `Stencil ${f + 1}: its knobs before, the nudge (drawn ${NUDGE_ZOOM} times bigger), and after`
+                    : `Stencil ${f + 1}: its 25 knobs, and where it fired on this card (points)`
+                }
               >
                 <span className="num">{f + 1}</span>
-                <canvas ref={(el) => { stencilCanvas.current[f] = el; }} style={{ width: STENCIL_PX, height: STENCIL_PX }} />
-                <span className="slide" aria-hidden>→</span>
-                <canvas ref={(el) => { mapCanvas.current[f] = el; }} className="map" style={{ width: MAP_PX, height: MAP_PX }} />
-              </button>
+                <canvas ref={(el) => { rowCanvas.current[f] = el; }} style={{ width: ROW_W, height: ROW_H }} />
+              </div>
             ))}
           </div>
           <p className="hint">
-            Left: the stencil. Right: where it fired on your drawing <small>(feature map, 24 × 24)</small>. Hover to
-            enlarge, click for the numbers.
+            Left: the stencil’s knobs <small>weights</small>. Right: where it fired on this card <small>points = activation</small>.
           </p>
         </section>
 
-        {/* ---------------- C ---------------- */}
-        <section className={`panel c${zoneClass("C")}`}>
-          <PanelHead letter="C" title="Layer 2: stencils of stencils" tech="second convolution layer · 8 units" />
+        {/* ---------------- C. Stencils of stencils ---------------- */}
+        <section className={panelClass("C")} onPointerEnter={hover("C")}>
+          <PanelHead letter="C" title="Stencils of stencils" tech="second convolution layer · 8 units" />
           <div className="legend">
-            <span><i className="sw box" /> the patch that excited it most</span>
+            <span>
+              <i className="sw box" /> the patch of this card that excited it
+            </span>
           </div>
           <div className="units">
             {Array.from({ length: F2 }, (_, u) => (
-              <button
+              <div
                 key={u}
-                ref={(el) => { unitCard.current[u] = el; }}
-                className={`unit${pop?.kind === "unit" && pop.index === u ? " active" : ""}`}
-                data-pop-anchor
-                onPointerEnter={(e) => {
-                  hoverUnit.current = u;
-                  dirty.current = true;
-                  hoverIn("unit", u)(e);
-                }}
-                onPointerLeave={() => {
-                  hoverUnit.current = null;
-                  dirty.current = true;
-                  hoverOut();
-                }}
-                onClick={togglePin("unit", u)}
-                aria-label={`Layer 2 unit ${u + 1}`}
+                className="unit"
+                style={stage === 4 && slow ? ({ "--blame": slow.blame2[u] } as React.CSSProperties) : undefined}
+                title={`Unit ${u + 1}: left, this card with the patch that excited it; right, its 4 favourite practice cards; the bar is its points`}
               >
                 <span className="num">{u + 1}</span>
                 <span className="unit-pics">
                   <canvas ref={(el) => { miniCanvas.current[u] = el; }} style={{ width: MINI_PX, height: MINI_PX }} />
-                  <canvas
-                    ref={(el) => { topCanvas.current[u] = el; }}
-                    className="tops"
-                    style={{ width: THUMB_PX * 2 + 2, height: THUMB_PX * 2 + 2 }}
-                  />
+                  <canvas ref={(el) => { topCanvas.current[u] = el; }} style={{ width: THUMB_PX * 2 + 2, height: THUMB_PX * 2 + 2 }} />
                 </span>
-                <span className="quiet-tag">quiet on this drawing</span>
-                <span className="meter" title="How strongly this unit fired on your drawing (points)">
-                  <span ref={(el) => { strengthBar.current[u] = el as HTMLDivElement | null; }} />
+                <span className="meter">
+                  <span ref={(el) => { strength.current[u] = el; }} />
                 </span>
-              </button>
-            ))}
-          </div>
-          <p className="hint">
-            Left: your drawing. Right: this unit’s 4 favourite training shapes so far. The bar is its points{" "}
-            <small>(activation)</small>. What do its favourites have in common?
-          </p>
-        </section>
-
-        {/* ---------------- D ---------------- */}
-        <section className={`panel d${zoneClass("D")}`}>
-          <PanelHead letter="D" title="The answer" tech="final judge · fully connected + softmax" />
-          <div className="d-body">
-          <div className="d-guess">
-          <div className="verdict" data-blank={stats?.blank ? "true" : "false"}>
-            <div className="verdict-icon">
-              {stats && !stats.blank ? <ShapeIcon cls={stats.guess} size={44} /> : <Pencil size={34} />}
-            </div>
-            <div>
-              <div className="verdict-line">{verdict}</div>
-              <div className="verdict-note">{verdictNote}</div>
-            </div>
-          </div>
-          <div className="bars" data-blank={stats?.blank ? "true" : "false"}>
-            {classList.map((c) => (
-              <div
-                key={c}
-                ref={(el) => { barRow.current[c] = el; }}
-                className={`bar-row${stats && !stats.blank && stats.guess === c ? " win" : ""}`}
-              >
-                <span className="bar-icon"><ShapeIcon cls={c} size={22} /></span>
-                <span className="bar-name">{CLASS_NAMES[c]}</span>
-                <span className="bar-track">
-                  <span className="bar-fill" ref={(el) => { barFill.current[c] = el as HTMLDivElement | null; }} />
-                </span>
-                <span className="bar-pct" ref={(el) => { barText.current[c] = el; }}>0%</span>
               </div>
             ))}
           </div>
-          <p className="hint judge-hint">
-            The judge adds up points from layer 2 and shares out 100% between the shapes.
-          </p>
+          <p className="hint">Left: this card. Right: the unit’s 4 favourite practice cards. What do its favourites have in common?</p>
+        </section>
+
+        {/* ---------------- D. The judge ---------------- */}
+        <section className={panelClass("D")} onPointerEnter={hover("D")}>
+          <PanelHead letter="D" title="The judge" tech="fully connected layer + softmax" />
+          <div className="bars" data-blank={stats?.blank ? "true" : "false"}>
+            {[0, 1, 2].map((c) => (
+              <div key={c} className={`bar-row${!stats?.blank && guess === c ? " win" : ""}${info.label === c ? " right" : ""}`}>
+                <span className="bar-icon">
+                  <ShapeIcon cls={c} size={22} />
+                </span>
+                <span className="bar-name">{CLASS_NAMES[c]}</span>
+                <span className="bar-track">
+                  <span className="bar-fill" ref={(el) => { barFill.current[c] = el; }} />
+                </span>
+                <span className="bar-pct n" title={`Its bet that this card is a ${CLASS_NAMES[c]}. The three bets always add up to 100%.`} ref={(el) => { barText.current[c] = el; }}>
+                  0%
+                </span>
+                {stage === 4 && slow && (
+                  <N className="blame-tag" note="Blame on this answer: its bet minus what the label says it should have been (100% for the right answer, 0% for the others).">
+                    {slow.blameAnswer[c] > 0 ? `${Math.round(slow.blameAnswer[c] * 100)}% too much` : `${Math.round(-slow.blameAnswer[c] * 100)}% too little`}
+                  </N>
+                )}
+              </div>
+            ))}
           </div>
-          <div className="report">
-            <div className="report-title">
-              Report card <small>on {TEST_SIZE} test shapes it never practised</small>
-            </div>
-            {classList.map((c) => {
-              const row = report && report.length === nClasses * nClasses ? report.slice(c * nClasses, (c + 1) * nClasses) : null;
-              const total = row ? row.reduce((a, b) => a + b, 0) : 0;
-              const right = row ? row[c] : 0;
-              let worst = -1;
-              if (row) for (let k = 0; k < nClasses; k++) if (k !== c && row[k] > 0 && (worst < 0 || row[k] > row[worst])) worst = k;
-              return (
-                <div className="report-row" key={c}>
-                  <span className="bar-icon"><ShapeIcon cls={c} size={18} /></span>
-                  <span className="report-track">
-                    <span className="report-fill" style={{ width: total ? `${(right / total) * 100}%` : "0%" }} />
-                  </span>
-                  <span className="report-num">{total ? `${right}/${total}` : "…"}</span>
-                  <span className="report-note">
-                    {row && worst >= 0 ? `${row[worst]} mistaken for a ${CLASS_NAMES[worst]}` : total ? "all correct" : ""}
-                  </span>
+          <p className="boxes">Three answer boxes. The builder chose them; there are no others.</p>
+
+          <div className="marking">
+            {info.kind === "star" ? (
+              <p>
+                <Star size={16} /> {TEXT.star} It picked <b>{CLASS_NAMES[guess]}</b>.
+              </p>
+            ) : sum && info.label !== null ? (
+              <>
+                <div className="sub">
+                  Label on the back: <b>{CLASS_NAMES[info.label]}</b>
                 </div>
-              );
-            })}
-          </div>
+                <div className="sum">
+                  It <N note={`Its bet on the right answer, ${CLASS_NAMES[info.label]}, for this card.`}>{sum.bet}</N>
+                  <br />
+                  How wrong <small>loss</small> ={" "}
+                  <N note="How wrong on this card: minus the natural log (ln) of its bet on the right answer. Sure and right is 0; a wild guess is about 1.1.">
+                    {sum.sum}
+                  </N>
+                </div>
+              </>
+            ) : (
+              <p>{stats?.blank ? "Draw a shape on the pad, or pick a card." : TEXT.noLabel}</p>
+            )}
+            {!trained && !stats?.blank && <p className="note">No practice yet, so its bets are as good as rolling dice.</p>}
           </div>
         </section>
       </main>
 
-      {/* ---------------- training strip ---------------- */}
-      <section className={`strip${zoneClass("strip")}`}>
-        <div className="strip-row controls">
-          <div className={`buttons${storyStep?.focus === "train" ? " focus" : ""}`}>
-            <button className="btn primary big" onClick={() => setRunning(true)} disabled={running || !ready} title="Start practising (space bar)">
+      {/* ---------------- teaching bar ---------------- */}
+      <section className="teach" aria-live="polite">
+        <div className="teach-num" title={`Idea ${active.n} of 7`}>
+          {active.n}
+        </div>
+        <div className="teach-text">
+          <div className="teach-name" title="The app teaches seven ideas. This is the one on screen now.">
+            Idea {active.n} of 7 · {active.name}
+            {stage > 0 && (
+              <>
+                {" "}· Slow-mo stage <N note="Slow-mo has five stages: pick a card, guess, mark it, blame flows back, nudge.">{stage} of 5</N>: {STAGES[stage - 1].title}
+              </>
+            )}
+          </div>
+          <p className="teach-line">{active.sentence}</p>
+          <p className="teach-sub">
+            {stage > 0 && slow ? `${stageText(stage, slow.label, slow.probs, slow.most)}${stage === 5 ? ` ${TEXT.slowmoSafe}` : ""}` : storyIdea ? storyIdea.task : active.look}
+            {storyDone && !stage && <b className="done"> Done ✓</b>}
+          </p>
+        </div>
+        <div className="teach-nav">
+          {stage > 0 ? (
+            <>
+              {stage < 5 ? (
+                <button className="btn primary" onClick={nextStage}>
+                  Next <ChevronRight size={18} />
+                </button>
+              ) : (
+                <button className="btn primary" onClick={() => startSlow()}>
+                  Another card <ChevronRight size={18} />
+                </button>
+              )}
+              <button className="btn ghost" onClick={stopSlow} aria-label="Stop slow-mo">
+                <X size={18} /> Stop
+              </button>
+            </>
+          ) : story !== null ? (
+            <>
+              <button className="btn ghost" disabled={story === 0} onClick={() => setStory(story - 1)}>
+                Back
+              </button>
+              <button className="btn primary" onClick={() => setStory(story < 6 ? story + 1 : null)}>
+                {story < 6 ? "Next idea" : "Finish"} <ChevronRight size={18} />
+              </button>
+            </>
+          ) : (
+            <div className="idea-dots">
+              {IDEAS.map((i) => (
+                <button key={i.n} className={i.n === active.n ? "on" : ""} onClick={() => setIdea(i.n)} title={`Idea ${i.n}: ${i.name}`}>
+                  {i.n}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* ---------------- controls ---------------- */}
+      <section className="strip">
+        <div className="strip-row">
+          <div className="buttons">
+            <button className={`btn primary big${story === 3 && !stage ? " pulse" : ""}`} onClick={() => startSlow()} disabled={!ready} title="Follow one card through all five stages, one step at a time">
+              <Snail size={20} /> Slow-mo
+            </button>
+            <button className={`btn big${story === 6 && !running ? " pulse" : ""}`} onClick={train} disabled={running || !ready}>
               <Play size={20} /> Train
             </button>
             <button className="btn big" onClick={() => setRunning(false)} disabled={!running}>
               <Pause size={20} /> Pause
             </button>
-            <button className="btn big" onClick={doStep} disabled={!ready} title="Practise on one mini-batch of 16 shapes">
-              <StepForward size={20} /> Step
-            </button>
-            <button
-              className={`btn big${needsReset ? " pulse" : ""}`}
-              onClick={() => doReset()}
-              disabled={!ready}
-              title="New random stencils and new shapes"
-            >
+            <button className={`btn big${needsReset ? " pulse" : ""}`} onClick={reset} disabled={!ready} title="Start again from the same random speckle, with fresh cards">
               <RotateCcw size={20} /> {needsReset ? "Reset to apply" : "Reset"}
             </button>
+            <button className={`btn big${story === 2 ? " pulse" : ""}`} onClick={tryStar} disabled={!ready}>
+              <Star size={20} /> Try a star
+            </button>
           </div>
+          <div className="buttons">
+            <button
+              className="btn big"
+              onClick={() => setModal("brain")}
+              disabled={!ready}
+            >
+              <BrainIcon size={20} /> Look inside the brain
+            </button>
+            <button
+              className="btn big"
+              onClick={() => {
+                setRunning(false);
+                setModal("cards");
+              }}
+              disabled={!ready}
+            >
+              <Layers size={20} /> Browse the cards
+            </button>
+          </div>
+        </div>
 
-          <div className="counters">
-            <Counter label="examples seen" value={stats ? stats.examples.toLocaleString("en-GB") : "0"} sub={`${stats?.step ?? 0} steps of ${BATCH}`} />
-            <Counter
-              label="test score"
-              tech="accuracy"
-              value={stats?.acc != null ? `${(stats.acc * 100).toFixed(0)}%` : "…"}
-              sub={`on ${TEST_SIZE} shapes it never practised`}
-              tone={stats?.acc != null && stats.acc >= 0.85 ? "good" : undefined}
-            />
-            {stats?.narrow && (
-              <Counter
-                label="any-kind score"
-                value={stats.wide != null ? `${(stats.wide * 100).toFixed(0)}%` : "…"}
-                sub="shapes of every kind"
-                tone="purple"
-              />
-            )}
-            <Counter label="how wrong" tech="loss" value={stats?.loss != null ? stats.loss.toFixed(2) : "…"} sub="lower is better" />
-            <Counter
-              label="practice time"
-              value={formatTime(stats?.ms ?? 0)}
-              sub={stats?.reachedMs != null ? `85% after ${formatTime(stats.reachedMs)}` : "goal: 85% in 30 s"}
-            />
-          </div>
+        <div className="fast">
+          <span>{TEXT.fastTraining}</span>
+          <canvas ref={tickCanvas} style={{ width: BATCH * (TICK + 4) - 4, height: TICK + 14 }} title="The 16 cards it just practised on: a tick if it guessed right, a cross if it guessed wrong" />
         </div>
 
         <div className="strip-row lower">
           <div className="settings">
             <label className="field">
               <span className="field-label">
-                Nudge size <small>learning rate</small> <b>{lr.toFixed(3)}</b>
+                Nudge size <small>learning rate</small>{" "}
+                <N note="How far each knob turns per nudge. Bigger learns faster but wobbles more.">
+                  <b>{lr.toFixed(3)}</b>
+                </N>
               </span>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                step={1}
-                value={slider}
-                onChange={(e) => setSlider(Number(e.target.value))}
-                aria-label="Nudge size (learning rate)"
-              />
+              <input type="range" min={0} max={100} step={1} value={slider} onChange={(e) => setSlider(Number(e.target.value))} aria-label="Nudge size (learning rate)" />
               <span className="field-note">{lrWord}</span>
             </label>
-            <div className="field seed">
+            <div className="field">
               <span className="field-label">
-                Seed <small>same seed, same starting speckle</small>
+                Variety of practice cards <small>applies on Reset</small>
               </span>
-              <span className="seed-row">
-                <input
-                  type="text"
-                  value={seedText}
-                  maxLength={16}
-                  onChange={(e) => setSeedText(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && doReset()}
-                  aria-label="Seed"
-                />
-                <button
-                  className="btn small"
-                  onClick={() => doReset(String(Math.floor(Math.random() * 9000) + 1000))}
-                  title="Pick a new seed and reset"
-                >
-                  <Dices size={16} /> New
-                </button>
+              <span className={`toggles${story === 6 && did.train && !did.centred ? " focus" : ""}`}>
+                {(["centredOnly", "noRotation", "outlinesOnly"] as const).map((k) => (
+                  <button key={k} type="button" role="switch" aria-checked={variety[k]} className={`toggle${variety[k] ? " on" : ""}`} onClick={() => setVariety({ ...variety, [k]: !variety[k] })}>
+                    <span className="knob" />
+                    {{ centredOnly: "centred only", noRotation: "no rotation", outlinesOnly: "outlines only" }[k]}
+                  </button>
+                ))}
               </span>
             </div>
-            <div className={`field variety${storyStep?.focus === "variety" ? " focus" : ""}`}>
-              <span className="field-label">
-                Variety of training shapes <small>applies on Reset</small>
-              </span>
-              <span className="toggles">
-                <Toggle label="centred only" on={variety.centredOnly} set={(v) => setVariety({ ...variety, centredOnly: v })} />
-                <Toggle label="no rotation" on={variety.noRotation} set={(v) => setVariety({ ...variety, noRotation: v })} />
-                <Toggle label="outlines only" on={variety.outlinesOnly} set={(v) => setVariety({ ...variety, outlinesOnly: v })} />
-                <Toggle label="add a 4th shape: line" on={lineClass} set={setLineClass} />
-              </span>
+            <div className="counters">
+              <div className="counter">
+                <span className="counter-label">cards practised</span>
+                <N className="counter-value" note={`Cards it has practised on so far: ${stats?.step ?? 0} nudges of ${BATCH} cards each. The pile has ${TRAIN_SIZE.toLocaleString("en-GB")} cards, so it sees each one many times.`}>
+                  {(stats?.cards ?? 0).toLocaleString("en-GB")}
+                </N>
+              </div>
+              <div className={`counter${stats?.acc != null && stats.acc >= 0.85 ? " good" : ""}`}>
+                <span className="counter-label">
+                  test score <small>accuracy</small>
+                </span>
+                <N className="counter-value" note={`How many of the ${TEST_SIZE} test cards it gets right. It never practises on these.`}>
+                  {stats?.acc != null ? `${Math.round(stats.acc * 100)}%` : "…"}
+                </N>
+              </div>
+              {stats?.narrow && (
+                <div className="counter purple">
+                  <span className="counter-label">every-kind score</span>
+                  <N className="counter-value" note={`Its score on ${TEST_SIZE} test cards of every kind: any place, any angle, filled or outlined. It only practised on the narrow kind.`}>
+                    {stats.wide != null ? `${Math.round(stats.wide * 100)}%` : "…"}
+                  </N>
+                </div>
+              )}
             </div>
           </div>
 
           <div className="charts">
             <figure>
               <figcaption>
-                How wrong <small>loss</small>
+                How wrong <small>loss</small>{" "}
+                <N note="How wrong on the last 16 cards, smoothed. 0 is sure and right; about 1.1 is a wild guess between three answers.">
+                  {stats?.loss != null ? stats.loss.toFixed(2) : ""}
+                </N>
               </figcaption>
-              <canvas ref={lossCanvas} />
+              <canvas ref={lossCanvas} title="How wrong after each nudge. The dashed line at 1.1 is a wild guess: one chance in three." />
             </figure>
             <figure>
               <figcaption>
-                Test score <small>accuracy</small>
+                Test score <small>on {TEST_SIZE} cards it never practised</small>
                 {stats?.narrow && (
                   <span className="key">
-                    <i className="k teal" /> same kind <i className="k purple" /> any kind
+                    <i className="k teal" /> same kind <i className="k purple" /> every kind
                   </span>
                 )}
               </figcaption>
-              <canvas ref={accCanvas} />
+              <canvas ref={accCanvas} title={`The share of the ${TEST_SIZE} test cards it gets right, checked every 25 nudges.`} />
             </figure>
           </div>
-
         </div>
       </section>
 
-      <details className="hood">
-        <summary>Under the hood</summary>
-        <div className="hood-body">
-          <div>
-            <h3>What is inside</h3>
-            <table>
-              <tbody>
-                <tr><th>Input</th><td>your 28 × 28 drawing</td><td>784 values</td></tr>
-                <tr><th>Layer 1 stencils</th><td>8 stencils, each 5 × 5, slid across the drawing</td><td>8 maps of 24 × 24</td></tr>
-                <tr><th>Squash <small>ReLU</small></th><td>negative values become zero</td><td>same</td></tr>
-                <tr><th>Shrink <small>max pooling</small></th><td>keep the strongest value in each 2 × 2 patch</td><td>8 maps of 12 × 12</td></tr>
-                <tr><th>Layer 2 stencils</th><td>8 stencils, each 3 × 3, looking across all 8 layer-1 maps</td><td>8 maps of 10 × 10</td></tr>
-                <tr><th>Squash + shrink</th><td>as before</td><td>8 maps of 5 × 5</td></tr>
-                <tr><th>Final judge</th><td>every value connected to every shape, then percentages <small>softmax</small></td><td>{nClasses} outputs</td></tr>
-              </tbody>
-            </table>
-            <p className="hood-note">
-              That is {(8 * 25 + 8 + 8 * 8 * 9 + 8 + nClasses * 200 + nClasses).toLocaleString("en-GB")} knobs{" "}
-              <small>(weights)</small> in all. The whole network is written by hand in plain TypeScript, with no
-              machine-learning library, and it trains in your browser: nothing is sent anywhere. Training is plain
-              stochastic gradient descent on mini-batches of {BATCH}, with two small safety belts: an oversized nudge is
-              scaled down, and unused layer-1 knobs fade slowly towards zero.
-            </p>
-          </div>
-          <div>
-            <h3>Check the maths</h3>
-            <p className="hood-note">
-              Backpropagation works out how to nudge each knob. To prove the hand-written maths is right, wiggle a few
-              knobs by a hair, measure how “how wrong” really changes, and compare.
-            </p>
-            <button className="btn small" onClick={runMathCheck} disabled={!ready}>
-              <Calculator size={16} /> Run the check <small>gradient check</small>
-            </button>
-            {mathRows && (
-              <table className="math">
-                <thead>
-                  <tr><th>knob</th><th>backprop says</th><th>measured</th><th /></tr>
-                </thead>
-                <tbody>
-                  {mathRows.map((r, i) => (
-                    <tr key={i}>
-                      <th>{r.param}[{r.index}]</th>
-                      <td>{r.backprop.toExponential(4)}</td>
-                      <td>{r.numeric.toExponential(4)}</td>
-                      <td className={r.relError < 1e-4 ? "ok" : "bad"}>{r.relError < 1e-4 ? "match" : "differs"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </div>
-      </details>
-
-      {/* ---------------- enlarged views ---------------- */}
-      <AnimatePresence>
-        {pop && lab && (
-          <motion.div
-            key={`${pop.kind}-${pop.index}`}
-            className={`pop pop-${pop.kind}${pop.pinned ? " pinned" : ""}`}
-            data-pop
-            style={{ left: pop.left, top: pop.top }}
-            initial={{ opacity: 0, scale: 0.94 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.96 }}
-            transition={{ duration: 0.12 }}
-          >
-            {pop.kind === "stencil" ? (
-              <>
-                <div className="pop-head">
-                  <b>Stencil {pop.index + 1}</b>
-                  <small>convolution filter</small>
-                  {pop.pinned && (
-                    <button className="close" onClick={() => setPop(null)} aria-label="Close">
-                      <X size={16} />
-                    </button>
-                  )}
-                </div>
-                <div className="pop-body">
-                  <figure>
-                    <canvas ref={popStencil} style={{ width: 200, height: 200 }} />
-                    <figcaption>
-                      {pop.pinned ? (
-                        <>
-                          Its 25 knobs <small>weights</small>, plus one extra knob <small>bias</small>:{" "}
-                          <b>{lab.net.b1[pop.index].toFixed(2)}</b>
-                        </>
-                      ) : (
-                        <>Click the stencil to see its numbers.</>
-                      )}
-                    </figcaption>
-                  </figure>
-                  <figure>
-                    <canvas ref={popMap} style={{ width: 196, height: 196 }} />
-                    <figcaption>
-                      Orange shows where it fired on your drawing <small>points = activation</small>
-                    </figcaption>
-                  </figure>
-                </div>
-                {pop.pinned && (
-                  <p className="slide-note">
-                    <span ref={slideText}>Move your pointer over the pad to slide this stencil by hand.</span>{" "}
-                    <small>points = knob × ink, added up over the 25 squares, plus the extra knob</small>
-                  </p>
-                )}
-              </>
-            ) : (
-              <>
-                <div className="pop-head">
-                  <b>Layer-2 unit {pop.index + 1}</b>
-                  <small>second-layer filter</small>
-                  {pop.pinned && (
-                    <button className="close" onClick={() => setPop(null)} aria-label="Close">
-                      <X size={16} />
-                    </button>
-                  )}
-                </div>
-                <div className="pop-body col">
-                  <figure>
-                    <canvas ref={popUnit} style={{ width: 196, height: 196 }} />
-                    <figcaption>
-                      The pink box is the patch of your drawing that excited this unit most.
-                    </figcaption>
-                  </figure>
-                  <figure>
-                    <canvas ref={popTops} style={{ width: 84 * 4 + 24, height: 84 }} />
-                    <figcaption>Its 4 favourite training shapes so far. Spot a pattern?</figcaption>
-                  </figure>
-                </div>
-              </>
-            )}
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {toast && (
-          <motion.div
-            className="toast"
-            initial={{ opacity: 0, y: 30, scale: 0.9 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 20 }}
-            role="status"
-          >
-            <span className="toast-star">★</span> {toast}
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {!ready && <div className="loading">Mixing up 1,800 shapes…</div>}
+      {modal === "brain" && lab && (
+        <BrainView
+          lab={lab}
+          onClose={() => setModal(null)}
+          onLoaded={() => {
+            setRunning(false);
+            stopSlow();
+            dirty.current = true;
+          }}
+        />
+      )}
+      {modal === "cards" && lab && (
+        <CardBrowser
+          lab={lab}
+          onClose={() => setModal(null)}
+          onPick={(x, label, kind, slowmo) => {
+            setModal(null);
+            stopSlow();
+            if (slowmo) startSlow(x, label);
+            else putOnPad(Float64Array.from(x), label, kind);
+          }}
+        />
+      )}
+      {!ready && <div className="loading">Drawing 1,800 cards…</div>}
     </div>
   );
 }
@@ -1289,38 +952,5 @@ function PanelHead({ letter, title, tech }: { letter: string; title: string; tec
         <small>{tech}</small>
       </div>
     </div>
-  );
-}
-
-function Counter({
-  label,
-  tech,
-  value,
-  sub,
-  tone,
-}: {
-  label: string;
-  tech?: string;
-  value: string;
-  sub?: string;
-  tone?: "good" | "purple";
-}) {
-  return (
-    <div className={`counter${tone ? ` ${tone}` : ""}`}>
-      <span className="counter-label">
-        {label} {tech && <small>{tech}</small>}
-      </span>
-      <span className="counter-value">{value}</span>
-      {sub && <span className="counter-sub">{sub}</span>}
-    </div>
-  );
-}
-
-function Toggle({ label, on, set }: { label: string; on: boolean; set: (v: boolean) => void }) {
-  return (
-    <button type="button" role="switch" aria-checked={on} className={`toggle${on ? " on" : ""}`} onClick={() => set(!on)}>
-      <span className="knob" />
-      {label}
-    </button>
   );
 }

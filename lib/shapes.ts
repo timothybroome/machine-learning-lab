@@ -8,8 +8,7 @@ const STROKE_MIN = 1.5;
 const STROKE_MAX = 2.6;
 const NOISE = 0.04;
 
-export const CLASS_NAMES = ["triangle", "square", "circle", "line"] as const;
-export type ShapeClass = 0 | 1 | 2 | 3;
+export const CLASS_NAMES = ["triangle", "square", "circle"] as const;
 
 /** The "variety" toggles. Each one narrows what the generator is allowed to make. */
 export interface Variety {
@@ -91,7 +90,6 @@ export function generateShape(rng: RNG, cls: number, variety: Variety, extras: G
   const wobble = 0.05 * r;
 
   let sdf: (px: number, py: number) => number;
-  let isLine = false;
 
   if (cls === 2) {
     // circle (very slightly squashed, like a hand-drawn one)
@@ -105,14 +103,6 @@ export function generateShape(rng: RNG, cls: number, variety: Variety, extras: G
       const v = (-dx * sa + dy * ca) / aspect;
       return Math.sqrt(u * u + v * v) - r;
     };
-  } else if (cls === 3) {
-    // line (the distractor class)
-    isLine = true;
-    const ax = cx - Math.cos(rotation) * r;
-    const ay = cy - Math.sin(rotation) * r;
-    const bx = cx + Math.cos(rotation) * r;
-    const by = cy + Math.sin(rotation) * r;
-    sdf = (px, py) => distToSegment(px, py, ax, ay, bx, by);
   } else {
     const n = cls === 0 ? 3 : 4;
     // triangle points up and square sits flat when rotation is 0; corners wobble a touch
@@ -131,8 +121,7 @@ export function generateShape(rng: RNG, cls: number, variety: Variety, extras: G
     for (let x = 0; x < GRID; x++) {
       const d = sdf(x + 0.5, y + 0.5);
       let v: number;
-      if (isLine) v = clamp01(stroke / 2 + 0.5 - d);
-      else if (filled) v = clamp01(0.5 - d);
+      if (filled) v = clamp01(0.5 - d);
       else v = clamp01(stroke / 2 + 0.5 - Math.abs(d));
       out[y * GRID + x] = clamp01(v * ink + rng.gauss() * NOISE);
     }
@@ -164,28 +153,33 @@ export function stampSegment(
   }
 }
 
-/** Rub out along a stroke (in grid coordinates). */
-export function eraseSegment(
-  grid: Float64Array,
-  x0: number,
-  y0: number,
-  x1: number,
-  y1: number,
-  width = 4,
-): void {
-  const pad = width / 2 + 1;
-  const minX = Math.max(0, Math.floor(Math.min(x0, x1) - pad));
-  const maxX = Math.min(GRID - 1, Math.ceil(Math.max(x0, x1) + pad));
-  const minY = Math.max(0, Math.floor(Math.min(y0, y1) - pad));
-  const maxY = Math.min(GRID - 1, Math.ceil(Math.max(y0, y1) + pad));
-  for (let y = minY; y <= maxY; y++) {
-    for (let x = minX; x <= maxX; x++) {
-      const d = distToSegment(x + 0.5, y + 0.5, x0, y0, x1, y1);
-      const keep = 1 - clamp01(width / 2 + 0.5 - d);
-      const i = y * GRID + x;
-      if (keep < grid[i]) grid[i] = keep;
-    }
+/**
+ * A five-pointed star. The network never practises on stars: this only exists for the "Try a star" button.
+ */
+export function generateStar(rng: RNG): Float64Array {
+  const grid = new Float64Array(PIXELS);
+  const r = rng.range(8, 11);
+  const cx = rng.range(r + 1.5, GRID - r - 1.5);
+  const cy = rng.range(r + 1.5, GRID - r - 1.5);
+  const rot = rng.range(0, Math.PI * 2);
+  const pts: [number, number][] = [];
+  for (let k = 0; k < 10; k++) {
+    const rr = k % 2 ? r * 0.42 : r;
+    const a = rot + (k * Math.PI) / 5;
+    pts.push([cx + Math.cos(a) * rr, cy + Math.sin(a) * rr]);
   }
+  for (let k = 0; k < 10; k++) stampSegment(grid, pts[k][0], pts[k][1], pts[(k + 1) % 10][0], pts[(k + 1) % 10][1], 1.8);
+  return grid;
+}
+
+/** A clean outline drawn with the pad's own brush. Only used by the automatic checks. */
+export function brushShape(cls: number, cx: number, cy: number, r: number, rot: number): Float64Array {
+  const grid = new Float64Array(PIXELS);
+  const n = cls === 0 ? 3 : cls === 1 ? 4 : 28;
+  const pts: [number, number][] = [];
+  for (let k = 0; k <= n; k++) pts.push([cx + r * Math.cos(rot + (k * 2 * Math.PI) / n), cy + r * Math.sin(rot + (k * 2 * Math.PI) / n)]);
+  for (let k = 0; k < n; k++) stampSegment(grid, pts[k][0], pts[k][1], pts[k + 1][0], pts[k + 1][1], 2);
+  return grid;
 }
 
 /**

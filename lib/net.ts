@@ -52,9 +52,10 @@ export interface Cache {
   i2: Int32Array; // which a2 cell won each 2x2 patch
   logits: Float64Array;
   probs: Float64Array;
-  // scratch space for backprop
-  dp1: Float64Array;
-  dlogits: Float64Array;
+  // blame, filled in by backprop: how much each value should have been different
+  dp2: Float64Array; // blame on each layer-2 value
+  dp1: Float64Array; // blame on each layer-1 value
+  dlogits: Float64Array; // blame on each answer (percentages minus the right answer)
 }
 
 /** Starting sizes of the random knobs, and the two safety belts used while training. */
@@ -100,6 +101,7 @@ export function createCache(nClasses: number): Cache {
     i2: new Int32Array(FC_IN),
     logits: new Float64Array(nClasses),
     probs: new Float64Array(nClasses),
+    dp2: new Float64Array(FC_IN),
     dp1: new Float64Array(F1 * P1N),
     dlogits: new Float64Array(nClasses),
   };
@@ -212,7 +214,7 @@ export function lossOf(cache: Cache, label: number): number {
  */
 export function backward(net: Net, cache: Cache, label: number, g: Net): number {
   const { W2, W3, nClasses } = net;
-  const { x, p1, i1, p2, i2, probs, dp1, dlogits } = cache;
+  const { x, p1, i1, p2, i2, probs, dp1, dp2, dlogits } = cache;
 
   // softmax + cross-entropy: gradient at the outputs is (percentages - right answer)
   for (let c = 0; c < nClasses; c++) {
@@ -224,6 +226,7 @@ export function backward(net: Net, cache: Cache, label: number, g: Net): number 
   }
 
   dp1.fill(0);
+  dp2.fill(0);
 
   // back through the judge, shrink 2 and squash 2: only the winner of each 2x2 patch gets blamed
   for (let u = 0; u < F2; u++) {
@@ -232,6 +235,7 @@ export function backward(net: Net, cache: Cache, label: number, g: Net): number 
       if (p2[o] <= 0) continue; // squashed to zero: no blame passes through
       let d = 0;
       for (let c = 0; c < nClasses; c++) d += W3[c * FC_IN + o] * dlogits[c];
+      dp2[o] = d;
       if (d === 0) continue;
       const local = i2[o] - u * C2N;
       const y = (local / C2) | 0;
@@ -285,26 +289,88 @@ export type ParamKey = (typeof PARAM_KEYS)[number];
  *    which stops a single surprising batch from wrecking what has been learned;
  *  - layer-1 knobs are pulled very slightly towards zero each step (weight decay), so knobs that
  *    are not earning their keep fade to white and the useful pattern is easier to see.
- * Returns the size of the nudge that was asked for (the gradient norm), before clipping.
  */
-export function sgdStep(net: Net, g: Net, lr: number, batchSize: number): number {
+function nudgeScale(g: Net, lr: number, batchSize: number): number {
   let sq = 0;
   for (const key of PARAM_KEYS) {
     const d = g[key];
     for (let i = 0; i < d.length; i++) sq += d[i] * d[i];
   }
   const norm = Math.sqrt(sq) / batchSize;
-  const scale = (lr / batchSize) * (norm > SETTINGS.clip ? SETTINGS.clip / norm : 1);
+  return (lr / batchSize) * (norm > SETTINGS.clip ? SETTINGS.clip / norm : 1);
+}
+
+const keepOf = (key: ParamKey, lr: number) => (key === "W1" ? 1 - lr * SETTINGS.decay : 1);
+
+export function sgdStep(net: Net, g: Net, lr: number, batchSize: number): void {
+  const scale = nudgeScale(g, lr, batchSize);
   for (const key of PARAM_KEYS) {
     const w = net[key];
     const d = g[key];
-    const keep = key === "W1" ? 1 - lr * SETTINGS.decay : 1;
+    const keep = keepOf(key, lr);
     for (let i = 0; i < w.length; i++) {
       w[i] = w[i] * keep - scale * d[i];
       d[i] = 0;
     }
   }
-  return norm;
+}
+
+/** The change sgdStep would make to one group of knobs, without making it. Used by slow-mo. */
+export function previewNudge(net: Net, g: Net, lr: number, batchSize: number, key: ParamKey): Float64Array {
+  const scale = nudgeScale(g, lr, batchSize);
+  const keep = keepOf(key, lr);
+  const w = net[key];
+  const out = new Float64Array(w.length);
+  for (let i = 0; i < w.length; i++) out[i] = w[i] * keep - scale * g[key][i] - w[i];
+  return out;
+}
+
+export function cloneNet(net: Net): Net {
+  const c = zerosLike(net);
+  for (const key of PARAM_KEYS) c[key].set(net[key]);
+  return c;
+}
+
+/** The whole trained brain as plain numbers, ready to save as a readable file. */
+export function brainToObject(net: Net, testScore: number) {
+  const grid = (a: Float64Array, from: number, rows: number, cols: number) =>
+    Array.from({ length: rows }, (_, r) => Array.from(a.subarray(from + r * cols, from + (r + 1) * cols)));
+  return {
+    what: "Shape Stencil Lab brain: every knob the network learned. No pictures, no rules, just numbers.",
+    knobs: net.W1.length + net.b1.length + net.W2.length + net.b2.length + net.W3.length + net.b3.length,
+    testScore,
+    answers: ["triangle", "square", "circle"],
+    layer1: Array.from({ length: F1 }, (_, f) => ({ stencil: grid(net.W1, f * K1N, K1, K1), startingPush: net.b1[f] })),
+    layer2: Array.from({ length: F2 }, (_, u) => ({
+      stencils: Array.from({ length: F1 }, (_, f) => grid(net.W2, (u * F1 + f) * K2N, K2, K2)),
+      startingPush: net.b2[u],
+    })),
+    judge: Array.from({ length: net.nClasses }, (_, c) => ({
+      answer: ["triangle", "square", "circle"][c],
+      knobs: Array.from(net.W3.subarray(c * FC_IN, (c + 1) * FC_IN)),
+      startingPush: net.b3[c],
+    })),
+  };
+}
+
+/** Rebuild a brain from a saved file. Throws a plain-English error if the file is not a brain. */
+export function brainFromObject(o: unknown): Net {
+  const b = o as ReturnType<typeof brainToObject>;
+  const bad = () => new Error("That file is not a Shape Stencil Lab brain.");
+  if (!b || !Array.isArray(b.layer1) || !Array.isArray(b.layer2) || !Array.isArray(b.judge)) throw bad();
+  if (b.layer1.length !== F1 || b.layer2.length !== F2 || b.judge.length !== 3) throw bad();
+  const net: Net = {
+    nClasses: 3,
+    W1: Float64Array.from(b.layer1.flatMap((l) => l.stencil.flat())),
+    b1: Float64Array.from(b.layer1.map((l) => l.startingPush)),
+    W2: Float64Array.from(b.layer2.flatMap((l) => l.stencils.flat(2))),
+    b2: Float64Array.from(b.layer2.map((l) => l.startingPush)),
+    W3: Float64Array.from(b.judge.flatMap((j) => j.knobs)),
+    b3: Float64Array.from(b.judge.map((j) => j.startingPush)),
+  };
+  const sizes: [Float64Array, number][] = [[net.W1, F1 * K1N], [net.b1, F1], [net.W2, F2 * F1 * K2N], [net.b2, F2], [net.W3, 3 * FC_IN], [net.b3, 3]];
+  for (const [a, n] of sizes) if (a.length !== n || a.some((v) => !Number.isFinite(v))) throw bad();
+  return net;
 }
 
 export function argmax(a: Float64Array): number {

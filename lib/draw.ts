@@ -26,8 +26,8 @@ function getScratch(w: number, h: number): [HTMLCanvasElement, CanvasRenderingCo
 }
 
 /** Make a canvas crisp on high-density screens. Returns a context scaled so 1 unit = 1 CSS pixel. */
-export function prepare(canvas: HTMLCanvasElement, cssW: number, cssH: number): CanvasRenderingContext2D {
-  const dpr = Math.min(3, window.devicePixelRatio || 1);
+export function prepare(canvas: HTMLCanvasElement, cssW: number, cssH: number, maxDpr = 3): CanvasRenderingContext2D {
+  const dpr = Math.min(maxDpr, window.devicePixelRatio || 1);
   const w = Math.round(cssW * dpr);
   const h = Math.round(cssH * dpr);
   if (canvas.width !== w || canvas.height !== h) {
@@ -151,7 +151,7 @@ export interface ChartOptions {
   yMax: number;
   yTicks: number[];
   yFormat: (v: number) => string;
-  goal?: { y: number; label: string };
+  goal?: { y: number; label: string; color?: string };
   xLabel: string;
 }
 
@@ -196,13 +196,14 @@ export function drawChart(
   if (o.goal) {
     ctx.save();
     ctx.setLineDash([4, 4]);
-    ctx.strokeStyle = "rgba(15,157,138,0.7)";
+    const rgb = o.goal.color ?? "15,157,138";
+    ctx.strokeStyle = `rgba(${rgb},0.7)`;
     ctx.beginPath();
     ctx.moveTo(left, Y(o.goal.y));
     ctx.lineTo(w - right, Y(o.goal.y));
     ctx.stroke();
     ctx.restore();
-    ctx.fillStyle = "rgba(15,157,138,0.95)";
+    ctx.fillStyle = `rgba(${rgb},0.95)`;
     ctx.textAlign = "left";
     ctx.fillText(o.goal.label, left + 6, Y(o.goal.y) - 8);
   }

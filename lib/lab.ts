@@ -1,48 +1,31 @@
 /**
- * The lab engine: data sets, the training loop, test scoring and the layer-2 "top examples".
+ * The lab engine: the two piles of cards, the training loop, test scoring and the layer-2 favourites.
  * It has no idea about the screen. The page asks it to do a few milliseconds of work each animation frame.
  */
 import { RNG } from "./rng";
-import { FULL_VARIETY, Variety, generateShape, PIXELS } from "./shapes";
-import {
-  Cache,
-  F2,
-  Net,
-  argmax,
-  backward,
-  createCache,
-  createNet,
-  forward,
-  hotSpot,
-  sgdStep,
-  zerosLike,
-} from "./net";
+import { FULL_VARIETY, Variety, generateShape } from "./shapes";
+import { Cache, F2, Net, argmax, backward, createCache, createNet, forward, hotSpot, lossOf, sgdStep, zerosLike } from "./net";
 
+export const SEED = 7; // Reset always starts from the same random speckle
 export const BATCH = 16;
 export const TRAIN_SIZE = 1500;
 export const TEST_SIZE = 300;
-export const EVAL_EVERY = 25; // steps between test-accuracy points
-export const SCAN_EVERY = 100; // steps between refreshes of the layer-2 top examples
+export const EVAL_EVERY = 25; // steps between test-score points
+export const SCAN_EVERY = 100; // steps between refreshes of the layer-2 favourites
 const SCAN_WINDOW = 300;
 export const TOP_K = 4;
 
-export interface LabConfig {
-  seed: number;
-  variety: Variety;
-  /** stretch goal: add "line" as a 4th, distractor class */
-  lineClass: boolean;
-}
-
-export interface DataSet {
+/** A pile of cards: the dots, and the label written on the back of each one. */
+export interface Pile {
   x: Float64Array[];
   y: Int32Array;
 }
 
 export interface AccPoint {
   step: number;
-  /** accuracy on test shapes made the same way as the training shapes */
+  /** test score on cards made the same way as the practice cards */
   acc: number;
-  /** accuracy on test shapes of every kind (only differs when variety toggles are on) */
+  /** test score on cards of every kind (only differs when a variety switch is on) */
   wide: number;
 }
 
@@ -59,55 +42,43 @@ export interface BatchItem {
   guess: number;
 }
 
-function makeSet(rng: RNG, n: number, nClasses: number, variety: Variety): DataSet {
+function makePile(rng: RNG, n: number, variety: Variety): Pile {
   const x: Float64Array[] = [];
   const y = new Int32Array(n);
   for (let i = 0; i < n; i++) {
-    const cls = i % nClasses; // balanced across classes
-    y[i] = cls;
-    x.push(generateShape(rng, cls, variety));
+    y[i] = i % 3; // balanced: the same number of each shape
+    x.push(generateShape(rng, y[i], variety));
   }
   return { x, y };
 }
 
-function isNarrow(v: Variety): boolean {
-  return v.centredOnly || v.noRotation || v.outlinesOnly;
-}
-
 type Job =
-  | { kind: "eval"; pos: number; right: number; rightWide: number; confusion: Int32Array }
+  | { kind: "eval"; pos: number; right: number; rightWide: number }
   | { kind: "scan"; pos: number; candidates: Int32Array; best: TopExample[][] };
 
 export class Lab {
-  config: LabConfig;
-  nClasses: number;
+  variety: Variety = { ...FULL_VARIETY };
   net!: Net;
   grads!: Net;
   cache!: Cache;
-  train!: DataSet;
-  test!: DataSet;
-  /** test shapes of every kind; the same object as `test` when no variety toggle is on */
-  wideTest!: DataSet;
+  train!: Pile;
+  test!: Pile;
+  /** test cards of every kind; the same pile as `test` when no variety switch is on */
+  wideTest!: Pile;
   narrow = false;
 
   step = 0;
-  examplesSeen = 0;
-  /** "how wrong" for every mini-batch so far */
+  cardsSeen = 0;
   lossHistory: number[] = [];
-  /** smoothed version, nicer to read on a chart */
   lossSmooth: number[] = [];
   accHistory: AccPoint[] = [];
   top: TopExample[][] = [];
   lastBatch: BatchItem[] = [];
-  /** report card: confusion[true shape * nClasses + guessed shape], on the test shapes */
-  confusion: Int32Array = new Int32Array(9);
-  /** bumps whenever the weights change, so the page knows to redraw */
+  /** bumps whenever the knobs change, so the page knows to redraw */
   version = 0;
   /** milliseconds of practice so far, by the clock on the wall (the page adds to this while training) */
   trainMs = 0;
-  /** trainMs at the moment the test score first passed 85% */
   reached85Ms: number | null = null;
-  reached85Step: number | null = null;
 
   private order!: Int32Array;
   private cursor = 0;
@@ -115,44 +86,46 @@ export class Lab {
   private scanCursor = 0;
   private jobs: Job[] = [];
 
-  constructor(config: LabConfig) {
-    this.config = config;
-    this.nClasses = config.lineClass ? 4 : 3;
-    this.reset(config);
+  constructor(variety: Variety = FULL_VARIETY) {
+    this.reset(variety);
   }
 
-  /** New random stencils and new data. The same seed always gives the same start. */
-  reset(config: LabConfig = this.config): void {
-    this.config = { ...config, variety: { ...config.variety } };
-    this.nClasses = config.lineClass ? 4 : 3;
-    const seed = config.seed >>> 0;
-    // separate streams, so the starting stencils depend only on the seed, not on the toggles
-    this.net = createNet(this.nClasses, new RNG(seed));
+  /** New random knobs and new cards. The seed is fixed, so Reset always replays the same run. */
+  reset(variety: Variety = this.variety): void {
+    this.variety = { ...variety };
+    this.narrow = variety.centredOnly || variety.noRotation || variety.outlinesOnly;
+    this.net = createNet(3, new RNG(SEED));
     this.grads = zerosLike(this.net);
-    this.cache = createCache(this.nClasses);
-    const dataRng = new RNG((seed ^ 0x9e3779b9) >>> 0);
-    this.narrow = isNarrow(config.variety);
-    this.train = makeSet(dataRng, TRAIN_SIZE, this.nClasses, config.variety);
-    this.test = makeSet(dataRng, TEST_SIZE, this.nClasses, config.variety);
-    this.wideTest = this.narrow ? makeSet(dataRng, TEST_SIZE, this.nClasses, FULL_VARIETY) : this.test;
-    this.batchRng = new RNG((seed ^ 0x51ed270b) >>> 0);
-    this.order = new Int32Array(TRAIN_SIZE);
-    for (let i = 0; i < TRAIN_SIZE; i++) this.order[i] = i;
+    this.cache = createCache(3);
+    const rng = new RNG(SEED ^ 0x9e3779b9);
+    this.train = makePile(rng, TRAIN_SIZE, variety);
+    this.test = makePile(rng, TEST_SIZE, variety);
+    this.wideTest = this.narrow ? makePile(rng, TEST_SIZE, FULL_VARIETY) : this.test;
+    this.batchRng = new RNG(SEED ^ 0x51ed270b);
+    this.order = Int32Array.from({ length: TRAIN_SIZE }, (_, i) => i);
     this.batchRng.shuffle(this.order);
     this.cursor = 0;
+    this.clearHistory();
+  }
+
+  /** Swap in a saved brain. The cards stay the same; the charts start again. */
+  loadBrain(net: Net): void {
+    this.net = net;
+    this.grads = zerosLike(net);
+    this.clearHistory();
+  }
+
+  private clearHistory(): void {
     this.scanCursor = 0;
     this.step = 0;
-    this.examplesSeen = 0;
+    this.cardsSeen = 0;
     this.lossHistory = [];
     this.lossSmooth = [];
     this.accHistory = [];
-    this.top = [];
-    for (let u = 0; u < F2; u++) this.top.push([]);
+    this.top = Array.from({ length: F2 }, () => []);
     this.lastBatch = [];
-    this.confusion = new Int32Array(this.nClasses * this.nClasses);
     this.trainMs = 0;
     this.reached85Ms = null;
-    this.reached85Step = null;
     this.jobs = [];
     this.version++;
     this.queueEval();
@@ -167,7 +140,7 @@ export class Lab {
     return this.accHistory.length ? this.accHistory[this.accHistory.length - 1] : null;
   }
 
-  /** One mini-batch of plain SGD. */
+  /** Fast training: guess, mark and blame 16 cards, then nudge once. */
   trainStep(lr: number): number {
     const { net, grads, cache, train } = this;
     let lossSum = 0;
@@ -186,7 +159,7 @@ export class Lab {
     sgdStep(net, grads, lr, BATCH);
     const loss = lossSum / BATCH;
     this.step++;
-    this.examplesSeen += BATCH;
+    this.cardsSeen += BATCH;
     this.lastBatch = batch;
     this.lossHistory.push(loss);
     const prev = this.lossSmooth.length ? this.lossSmooth[this.lossSmooth.length - 1] : loss;
@@ -198,30 +171,25 @@ export class Lab {
   }
 
   private queueEval(): void {
-    this.jobs.push({ kind: "eval", pos: 0, right: 0, rightWide: 0, confusion: new Int32Array(this.nClasses * this.nClasses) });
+    this.jobs.push({ kind: "eval", pos: 0, right: 0, rightWide: 0 });
   }
 
   private queueScan(): void {
-    // look at a rolling window of training shapes, plus the current champions
+    // look at a rolling window of practice cards, plus the current favourites
     const set = new Set<number>();
     for (const list of this.top) for (const t of list) set.add(t.index);
     for (let i = 0; i < SCAN_WINDOW; i++) set.add((this.scanCursor + i) % TRAIN_SIZE);
     this.scanCursor = (this.scanCursor + SCAN_WINDOW) % TRAIN_SIZE;
-    const best: TopExample[][] = [];
-    for (let u = 0; u < F2; u++) best.push([]);
-    this.jobs.push({ kind: "scan", pos: 0, candidates: Int32Array.from(set), best });
+    this.jobs.push({ kind: "scan", pos: 0, candidates: Int32Array.from(set), best: Array.from({ length: F2 }, () => []) });
   }
 
-  /** Do a slice of a queued job (test scoring or top-example scan). Returns true when that job finished. */
   private runJob(job: Job, count: number): boolean {
     const { net, cache } = this;
     if (job.kind === "eval") {
       const end = Math.min(TEST_SIZE, job.pos + count);
       for (let i = job.pos; i < end; i++) {
         forward(net, this.test.x[i], cache);
-        const guess = argmax(cache.probs);
-        if (guess === this.test.y[i]) job.right++;
-        job.confusion[this.test.y[i] * this.nClasses + guess]++;
+        if (argmax(cache.probs) === this.test.y[i]) job.right++;
         if (this.narrow) {
           forward(net, this.wideTest.x[i], cache);
           if (argmax(cache.probs) === this.wideTest.y[i]) job.rightWide++;
@@ -230,13 +198,8 @@ export class Lab {
       job.pos = end;
       if (end < TEST_SIZE) return false;
       const acc = job.right / TEST_SIZE;
-      const wide = this.narrow ? job.rightWide / TEST_SIZE : acc;
-      this.accHistory.push({ step: this.step, acc, wide });
-      this.confusion = job.confusion;
-      if (acc >= 0.85 && this.reached85Ms === null) {
-        this.reached85Ms = this.trainMs;
-        this.reached85Step = this.step;
-      }
+      this.accHistory.push({ step: this.step, acc, wide: this.narrow ? job.rightWide / TEST_SIZE : acc });
+      if (acc >= 0.85 && this.reached85Ms === null) this.reached85Ms = this.trainMs;
       return true;
     }
     const end = Math.min(job.candidates.length, job.pos + count);
@@ -261,42 +224,37 @@ export class Lab {
   }
 
   /**
-   * Work for up to `budgetMs`. Queued scoring jobs always finish before the next training step,
-   * so results depend only on the seed and the number of steps, never on how fast the computer is.
+   * Work for up to `budgetMs`. Queued scoring always finishes before the next training step,
+   * so results depend only on the number of steps, never on how fast the computer is.
    */
-  advance(budgetMs: number, training: boolean, lr: number, now: () => number = () => performance.now()): void {
-    const start = now();
-    let guard = 0;
-    while (guard++ < 10000) {
+  advance(budgetMs: number, training: boolean, lr: number): void {
+    const start = performance.now();
+    for (let guard = 0; guard < 10000; guard++) {
       if (this.jobs.length) {
         if (this.runJob(this.jobs[0], 24)) this.jobs.shift();
-      } else if (training) {
-        this.trainStep(lr);
-      } else {
-        break;
-      }
-      if (now() - start >= budgetMs) break;
+      } else if (training) this.trainStep(lr);
+      else break;
+      if (performance.now() - start >= budgetMs) break;
     }
   }
 
-  /** Finish any queued scoring right now (used by the Step button and the automatic checks). */
+  /** Finish any queued scoring right now. */
   flush(): void {
-    while (this.jobs.length) {
-      if (this.runJob(this.jobs[0], 100000)) this.jobs.shift();
-    }
+    while (this.jobs.length) if (this.runJob(this.jobs[0], 100000)) this.jobs.shift();
   }
 
-  /** Accuracy on any labelled set. Used by the automatic checks. */
-  accuracyOn(set: DataSet): number {
+  accuracyOn(pile: Pile): number {
     let right = 0;
-    for (let i = 0; i < set.x.length; i++) {
-      forward(this.net, set.x[i], this.cache);
-      if (argmax(this.cache.probs) === set.y[i]) right++;
+    for (let i = 0; i < pile.x.length; i++) {
+      forward(this.net, pile.x[i], this.cache);
+      if (argmax(this.cache.probs) === pile.y[i]) right++;
     }
-    return right / set.x.length;
+    return right / pile.x.length;
   }
-}
 
-export function emptyDrawing(): Float64Array {
-  return new Float64Array(PIXELS);
+  /** Mark one card: what the brain guesses and how wrong it is. Used by the card browser. */
+  mark(pile: Pile, i: number): { guess: number; loss: number } {
+    forward(this.net, pile.x[i], this.cache);
+    return { guess: argmax(this.cache.probs), loss: lossOf(this.cache, pile.y[i]) };
+  }
 }

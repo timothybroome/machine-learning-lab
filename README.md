@@ -1,77 +1,64 @@
 # Shape Stencil Lab
 
-A single-page web app that trains a tiny convolutional network on triangles, squares and circles, in the
-browser, so a learner can watch random stencils turn into edge and line detectors. It is a companion to the
-picture book *From Perceptrons to ChatGPT* and is written for a curious 12-year-old.
+A one-page web app where a curious 12-year-old watches a tiny network teach itself to tell triangles, squares
+and circles apart. It really learns, in the browser, and every panel exists to explain one of seven ideas.
+Companion to the picture book *From Perceptrons to ChatGPT*.
 
-Live: https://stencil.tjb.app
-
-The build spec is in [`Shape Stencil Lab build spec.md`](./Shape%20Stencil%20Lab%20build%20spec.md).
+Live: https://stencil.tjb.app · Spec: [`Shape Stencil Lab build spec-2.md`](./Shape%20Stencil%20Lab%20build%20spec-2.md) ·
+The build for the first spec is kept on the `v1-first-spec` branch.
 
 ## What is in here
 
 | Path | What it is |
 | --- | --- |
-| `lib/net.ts` | The network, written by hand: forward pass, backpropagation, SGD, gradient check, hot-spot tracing. No ML library. |
-| `lib/shapes.ts` | The seeded shape generator, the variety toggles, and the drawing-pad brush. |
-| `lib/lab.ts` | The training loop, test scoring, report card and layer-2 "top examples". Knows nothing about the screen. |
-| `lib/rng.ts` | Seeded random numbers (mulberry32). |
-| `lib/draw.ts` | Canvas helpers: pixel grids, heat maps, charts. |
-| `components/StencilLab.tsx` | The page: panels A to D, the training strip, story mode, enlarged views. |
-| `scripts/check.ts` | Headless acceptance checks (spec section 8). |
-| `scripts/shoot.ts` | Drives the real page in headless Chromium: screenshots, speed, drawn triangles. |
-
-The page is static; Next.js only serves it. All training happens on the visitor's device and nothing is sent
-anywhere. In the browser console, `stencilLab` exposes the live engine, for example `stencilLab.net.W1`.
-
-## Run it
+| `lib/ideas.ts` | Every sentence the app says: the seven ideas, the slow-mo stage lines, the brain and card sentences. |
+| `lib/net.ts` | The network, by hand: forward, backprop, SGD, gradient check, nudge preview, save and load. Its only inputs are dots and labels; it does not import the generator. |
+| `lib/shapes.ts` | The drawer: seeded card generator, variety switches, the star, the pad's brush. |
+| `lib/lab.ts` | The two piles of cards, the training loop, test scoring, layer-2 favourites. |
+| `components/StencilLab.tsx` | Panels A to D, teaching bar, slow-mo, story mode, controls. |
+| `components/BrainView.tsx`, `CardBrowser.tsx` | "Look inside the brain" and "Browse the cards". |
+| `scripts/check.ts`, `scripts/shoot.ts` | Headless checks, and checks that drive the real page in Chromium. |
 
 ```bash
 npm install
-npm run dev          # http://localhost:3000
-npm run check        # acceptance checks, about 3 minutes
-npm run build && npm start
+npm run dev      # http://localhost:3000
+npm run check    # about 2 minutes
+npx tsx scripts/shoot.ts http://localhost:3000 shots   # needs: npx playwright install chromium
 ```
 
-Browser checks and screenshots (needs `npx playwright install chromium` once):
+Deployed on Coolify from `main` with the `Dockerfile`; pushing to `main` redeploys.
 
-```bash
-npx tsx scripts/shoot.ts http://localhost:3000 shots
-```
+## Done when: what actually happens
 
-## Deployment
-
-Deployed on Coolify from this repository's `main` branch using the `Dockerfile` (Next.js standalone output,
-port 3000). Pushing to `main` redeploys automatically. Coolify's health check must use host `127.0.0.1`,
-not `localhost`: inside the Alpine image `localhost` resolves to IPv6 first and the check fails.
-
-## Acceptance checks: what actually happens
-
-Measured on the deployment machine. `npm run check` covers three seeds (7, 42, 2024); the browser numbers
-are from `scripts/shoot.ts` in headless Chromium with seed 7 and the default nudge size of 0.1.
+Measured on the deployment machine, in Node (`npm run check`) and in headless Chromium (`scripts/shoot.ts`).
 
 | Check | Result |
 | --- | --- |
-| At Reset, layer-1 stencils look like random speckle | Yes. Starting knobs are small random values; each stencil is drawn scaled to its own largest knob. |
-| Over 85% test accuracy, with at least half the stencils edge-like | 85% is passed after about 8 to 11 s; 92 to 95% after 30 s. After training, 7 or 8 of the 8 stencils are dominated by a single stripe direction (a "stripe share" above 0.55, where random speckle scores about 0.34). To the eye they are bars and diagonals rather than textbook edges, because most of the ink is thin outlines. |
-| Drawing a triangle anywhere gives it the highest percentage | Nearly always, not always. Of 3,000 clean triangles drawn with the pad's brush at random positions, sizes and rotations, 99.0%, 96.7% and 87.5% were recognised on the three seeds. In the browser, five of six scripted mouse-drawn triangles were recognised; the sixth (a downward-pointing triangle, low on the left) is called a square on every seed tried, and moving it away from the edge does not fix it. Wobbly simulated scribbles: 92 to 98% of triangles, 81 to 86% of squares and 92 to 97% of circles recognised. |
-| "Centred only", then shapes in a corner | A clear drop. Centred test score 99 to 100%, but 55 to 57% on shapes of every kind (the purple line on the chart), and about 30% on small shapes pushed into a corner, which is chance. Pooling does not rescue it, because the final judge has only ever seen points arrive in the middle. A large triangle drawn towards a corner is still often recognised. |
-| Page stays responsive while training | About 52 frames a second while training, worst gap between frames 33 ms. Training gets 11 ms of each animation frame. |
-| Same seed, same stencils and curve | Yes, bit for bit, including when run with very different time slices. Scoring jobs always finish before the next training step, so results depend only on the seed and step count, not on how fast the computer is. |
-| Numerical gradient check | Worst relative error about 3e-8 over 288 knobs. The same check can be run in the page under "Under the hood". |
+| Over 85% on the 300 test cards within about 30 s | In the browser: 85% after 11.8 s, 92.3% at 30 s. In Node: 85% after 9.4 s, 93.3% at 30 s. |
+| A drawn triangle, square or circle gets the highest percentage | Usually, not always. 2,000 brush-drawn shapes of each kind at random places, sizes and angles: triangles 98.3%, squares 89.8%, circles 99.2%. Mouse-drawn in six places in the browser: triangles 6/6, squares 5/6, circles 6/6. Squares are the weak spot. |
+| Gradient check | Worst relative error 2e-8 over 288 knobs. |
+| Same seed, same start, same curve | Identical. The seed is fixed, so Reset always replays the same run, however fast the computer is. |
+| Responsive while training | About 51 frames a second; worst gap between frames 33 ms. |
+| Practice is balanced | 500/500/500 practice and 100/100/100 test; no card is in both piles. |
+| Every idea has its sentence and proof | The teaching bar shows each sentence word for word; story mode walks all seven. |
+| Every number has a hover note | An automatic scan of the page finds no number without one. Numbers drawn inside pictures (chart axes, the card browser) carry the note on the picture. |
+| Slow-mo: 5 stages, sum matches bet, change map matches the real change | Yes. The sum is worked out from the bet as displayed, so a learner can check it on a calculator (for example bet 42%, −ln(0.42) = 0.87). The change map equals the real one-card weight change times 20, to the last digit. |
+| Slow-mo doesn't change the training run | All 1,395 knobs are identical before and after. |
+| Speckle at the start, edge-like once trained | 8 of 8 stencils end up dominated by stripes in one direction. They look like bars and diagonals more than textbook edges. |
+| Try a star | Always one of the three answers, with the idea 3 sentence. The trained seed-7 brain called five stars in a row "triangle". |
+| Centred only, then cards in a corner | Centred test cards 99%, cards of every kind 56%, small cards in a corner 32% (chance is 33%). A hand-drawn triangle in a corner was still called a triangle, so the drop shows in the scores more reliably than in a single drawing. |
+| Download a brain, load it fresh | 29 KB file; the test score after loading equals the score in the file exactly, with no training. |
 
-## Where the build departs from the spec, and why
+## Where the build departs from the spec
 
-- **Two safety belts on plain SGD.** The update is plain mini-batch SGD, plus (1) the whole nudge is scaled
-  down when its size exceeds 2.5 (gradient clipping) and (2) layer-1 knobs decay very slightly towards zero
-  each step (weight decay 0.01). Without clipping, one unlucky batch occasionally knocked accuracy from 90%
-  down to about 45%, which is confusing to watch. Without the decay, the starting speckle never fades and
-  the stencils do not visibly turn into lines. Both are stated in the page under "Under the hood".
-- **Shapes are regular.** Making triangles lopsided and squares oblong, or letting shapes touch the grid
-  edge, cost about 6 to 7 points of test accuracy at this network size, so the generator keeps shapes regular with
-  a small corner wobble.
-- **"Size" means** the triangle's side, roughly the square's side, or the circle's width, from 8 to 20 pixels.
-- **Additions:** a report card (per-shape results on the test set), an eraser, the latest mini-batch shown
-  under the pad (click a shape to load it), "slide the stencil by hand" (pin a stencil, then move the pointer
-  over the pad to see the points it scores there), and the "line" distractor class from the stretch goal.
-- **Practice time** is wall-clock time while Train is on, which is how a learner would time it.
+- **Not a single HTML file.** It is a Next.js app, as originally requested, served as one static page with no
+  backend calls. Everything else in the constraints holds.
+- **Two safety belts on plain SGD**, as in the first build: an oversized nudge is scaled down (gradient
+  clipping at 2.5), and layer-1 knobs decay slightly towards zero (0.01). Without the first, a single bad
+  batch can crash the score mid-run; without the second, the stencils never visibly turn into lines. Slow-mo
+  shows exactly the nudge this rule produces.
+- **Story mode follows ideas 1 to 7 in order.** The spec's list of actions is in a slightly different order
+  from its list of ideas; each action is attached to the idea it proves. Idea 2 asks the learner to read the
+  Drawer and Learner card rather than press something.
+- **A second test score appears when a variety switch is on** ("every-kind score"), because that is what
+  shows a narrow learner.

@@ -1,165 +1,156 @@
 /**
- * Automatic checks for the acceptance list in the build spec (section 8).
+ * Automatic checks for the "It works" list in the build spec (section 6), plus the brain and card checks.
  * Run with: npm run check
  */
 import { RNG } from "../lib/rng";
-import { FULL_VARIETY, generateShape, scribbleShape, stampSegment } from "../lib/shapes";
-import { F1, argmax, createCache, createNet, forward, gradientCheck } from "../lib/net";
-import { DataSet, Lab } from "../lib/lab";
-import { orientedShare } from "../lib/analysis";
+import { FULL_VARIETY, brushShape, generateShape } from "../lib/shapes";
+import { F1, Net, argmax, backward, brainFromObject, brainToObject, cloneNet, createCache, createNet, forward, gradientCheck, previewNudge, sgdStep, zerosLike } from "../lib/net";
+import { Lab, Pile, TEST_SIZE, TRAIN_SIZE } from "../lib/lab";
+import { NUDGE_ZOOM, shownBet, sumText } from "../lib/ideas";
 
-const edgeScore = (w: Float64Array, f: number) => orientedShare(w, f * 25);
-
-const LR = Number(process.env.LR ?? 0.1);
-const SEEDS = (process.env.SEEDS ?? "7,42,2024").split(",").map(Number);
+const LR = 0.1;
 let failures = 0;
-
 function check(name: string, ok: boolean, detail: string): void {
   if (!ok) failures++;
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}\n      ${detail}`);
 }
 
-function trainFor(lab: Lab, seconds: number, lr: number): void {
+/** How line-like is a 5x5 stencil? The share of its pattern explained by stripes in one direction. Speckle scores about 0.34. */
+function stripeShare(w: Float64Array, f: number): number {
+  let mean = 0, total = 0, best = 0;
+  for (let i = 0; i < 25; i++) mean += w[f * 25 + i] / 25;
+  for (let i = 0; i < 25; i++) total += (w[f * 25 + i] - mean) ** 2;
+  for (let deg = 0; deg < 180; deg += 15) {
+    const c = Math.cos((deg * Math.PI) / 180), s = Math.sin((deg * Math.PI) / 180);
+    const sum = new Float64Array(5), cnt = new Float64Array(5);
+    for (let y = 0; y < 5; y++)
+      for (let x = 0; x < 5; x++) {
+        const bin = Math.max(0, Math.min(4, Math.round(((x - 2) * c + (y - 2) * s) / 1.15) + 2));
+        sum[bin] += w[f * 25 + y * 5 + x] - mean;
+        cnt[bin]++;
+      }
+    let e = 0;
+    for (let b = 0; b < 5; b++) if (cnt[b]) e += (sum[b] * sum[b]) / cnt[b];
+    best = Math.max(best, e);
+  }
+  return total > 0 ? best / total : 0;
+}
+
+function trainFor(lab: Lab, seconds: number): void {
   const start = performance.now();
   while (performance.now() - start < seconds * 1000) {
-    lab.advance(12, true, lr);
+    lab.advance(12, true, LR);
     lab.trainMs = performance.now() - start;
   }
   lab.flush();
 }
 
-// --- 1. gradient check -------------------------------------------------------
+// --- gradient check ----------------------------------------------------------
 {
   const rng = new RNG(123);
-  let worst = 0;
-  let n = 0;
-  for (const nClasses of [3, 4]) {
-    const net = createNet(nClasses, rng);
-    for (let t = 0; t < 4; t++) {
-      const cls = rng.int(nClasses);
-      const rows = gradientCheck(net, generateShape(rng, cls, FULL_VARIETY), cls, rng, 6);
-      for (const r of rows) {
-        n++;
-        if (Math.abs(r.numeric) + Math.abs(r.backprop) > 1e-7) worst = Math.max(worst, r.relError);
-      }
+  const net = createNet(3, rng);
+  let worst = 0, n = 0;
+  for (let t = 0; t < 8; t++) {
+    const cls = rng.int(3);
+    for (const r of gradientCheck(net, generateShape(rng, cls, FULL_VARIETY), cls, rng, 6)) {
+      n++;
+      if (Math.abs(r.numeric) + Math.abs(r.backprop) > 1e-7) worst = Math.max(worst, r.relError);
     }
   }
   check("gradient check: numerical gradient matches backprop", worst < 1e-5, `${n} knobs checked, worst relative error ${worst.toExponential(2)}`);
 }
 
-// --- 2. same seed, same stencils, same curve ---------------------------------
+// --- cards: balanced, separate piles -----------------------------------------
+const lab = new Lab();
 {
-  const a = new Lab({ seed: 99, variety: FULL_VARIETY, lineClass: false });
-  const b = new Lab({ seed: 99, variety: FULL_VARIETY, lineClass: false });
-  const c = new Lab({ seed: 100, variety: FULL_VARIETY, lineClass: false });
+  const count = (p: Pile) => [0, 1, 2].map((c) => p.y.filter((v) => v === c).length).join("/");
+  const key = (x: Float64Array) => Array.from(x, (v) => v.toFixed(4)).join(",");
+  const seen = new Set(lab.train.x.map(key));
+  const shared = lab.test.x.filter((x) => seen.has(key(x))).length;
+  check("practice and test piles are balanced", count(lab.train) === "500/500/500" && count(lab.test) === "100/100/100", `practice ${count(lab.train)} of ${TRAIN_SIZE}, test ${count(lab.test)} of ${TEST_SIZE} (triangle/square/circle)`);
+  check("no card appears in both piles", shared === 0 && seen.size === TRAIN_SIZE, `${shared} shared cards; ${seen.size} distinct practice cards`);
+}
+
+// --- same seed, same stencils, same curve ------------------------------------
+{
+  const a = new Lab(), b = new Lab();
   const sameStart = a.net.W1.every((v, i) => v === b.net.W1[i]);
-  const differentSeedDiffers = a.net.W1.some((v, i) => v !== c.net.W1[i]);
-  // run them with very different time slices, as a fast and a slow computer would
   while (a.step < 200) a.advance(2, true, LR);
   while (b.step < 200) b.advance(50, true, LR);
-  a.flush();
-  b.flush();
-  const n = Math.min(a.lossHistory.length, b.lossHistory.length, 200);
-  let sameCurve = true;
-  for (let i = 0; i < n; i++) if (a.lossHistory[i] !== b.lossHistory[i]) sameCurve = false;
-  const accA = a.accHistory.filter((p) => p.step <= 200).map((p) => p.acc).join(",");
-  const accB = b.accHistory.filter((p) => p.step <= 200).map((p) => p.acc).join(",");
-  check("same seed gives the same starting stencils", sameStart && differentSeedDiffers, `identical W1: ${sameStart}; other seed differs: ${differentSeedDiffers}`);
-  check("same seed gives the same training curve", sameCurve && accA === accB, `first ${n} loss values identical: ${sameCurve}; accuracy points identical: ${accA === accB}`);
+  a.flush(); b.flush();
+  const sameCurve = a.lossHistory.slice(0, 200).every((v, i) => v === b.lossHistory[i]);
+  const acc = (l: Lab) => l.accHistory.filter((p) => p.step <= 200).map((p) => p.acc).join(",");
+  check("Reset repeats the same starting stencils and the same training curve", sameStart && sameCurve && acc(a) === acc(b), `identical start: ${sameStart}; first 200 how-wrong values identical: ${sameCurve}; test scores identical: ${acc(a) === acc(b)}`);
 }
 
-// --- 3. speed, accuracy, edges, drawn triangles -----------------------------
-for (const seed of SEEDS) {
-  const lab = new Lab({ seed, variety: FULL_VARIETY, lineClass: false });
-  const startEdges = Array.from({ length: F1 }, (_, f) => edgeScore(lab.net.W1, f));
-  trainFor(lab, 30, LR);
-  const acc = lab.latestAcc!.acc;
-  check(
-    `seed ${seed}: over 85% test accuracy within 30 s`,
-    acc > 0.85,
-    `test accuracy ${(acc * 100).toFixed(1)}% after ${lab.step} steps (${lab.examplesSeen} examples); first passed 85% at ${lab.reached85Ms === null ? "never" : (lab.reached85Ms / 1000).toFixed(1) + " s"}`,
-  );
-  const edges = Array.from({ length: F1 }, (_, f) => edgeScore(lab.net.W1, f));
-  const edgy = edges.filter((e) => e > 0.55).length;
-  check(
-    `seed ${seed}: at least half of the layer-1 stencils look edge-like`,
-    edgy >= 4,
-    `stripe share per stencil (random speckle is about 0.34), start: [${startEdges.map((e) => e.toFixed(2)).join(" ")}]  trained: [${edges.map((e) => e.toFixed(2)).join(" ")}]  (${edgy}/8 above 0.55)`,
-  );
+// --- slow-mo: the sum matches the bet, the change map matches the real nudge, and nothing is disturbed
+{
+  const l = new Lab();
+  while (l.step < 60) l.advance(50, true, LR);
+  l.flush();
+  const before = cloneNet(l.net);
+  const cache = createCache(3), g = zerosLike(l.net);
+  const x = l.train.x[11], label = l.train.y[11];
+  forward(l.net, x, cache);
+  backward(l.net, cache, label, g);
+  const shown = previewNudge(l.net, g, LR, 1, "W1").map((v) => v * NUDGE_ZOOM);
+  const untouched = (["W1", "b1", "W2", "b2", "W3", "b3"] as const).every((k) => l.net[k].every((v, i) => v === before[k][i]));
+  const real = cloneNet(l.net);
+  sgdStep(real, g, LR, 1);
+  let worst = 0;
+  for (let i = 0; i < shown.length; i++) worst = Math.max(worst, Math.abs(shown[i] - (real.W1[i] - before.W1[i]) * NUDGE_ZOOM));
+  const t = sumText(cache.probs[label], label);
+  const sumOk = Math.abs(t.loss - -Math.log(shownBet(cache.probs[label]))) < 1e-12 && Math.abs(t.loss - -Math.log(cache.probs[label])) < 0.06;
+  check("slow-mo does not change the real training run", untouched, "all 1,395 knobs identical before and after a slow-mo card");
+  check("slow-mo change map matches the real weight change, scaled", worst < 1e-12, `largest difference ${worst.toExponential(1)} (change drawn ${NUDGE_ZOOM} times bigger)`);
+  check("the how-wrong sum matches the displayed bet", sumOk, `${t.bet}, ${t.sum}; exact value ${(-Math.log(cache.probs[label])).toFixed(3)}`);
+}
 
-  // clean triangles drawn with the pad's own brush: any position, size and rotation
-  {
-    const rng = new RNG(seed + 2);
-    const cache = createCache(3);
-    const N = 3000;
-    let right = 0;
-    for (let i = 0; i < N; i++) {
-      const r = rng.range(5, 10);
-      const rot = rng.range(0, Math.PI * 2);
-      const cx = rng.range(r + 1.5, 26.5 - r);
-      const cy = rng.range(r + 1.5, 26.5 - r);
-      const g = new Float64Array(784);
-      const p = [0, 1, 2, 0].map((k) => [cx + r * Math.cos(rot + (k * 2 * Math.PI) / 3), cy + r * Math.sin(rot + (k * 2 * Math.PI) / 3)]);
-      for (let k = 0; k < 3; k++) stampSegment(g, p[k][0], p[k][1], p[k + 1][0], p[k + 1][1], 2);
-      forward(lab.net, g, cache);
-      if (argmax(cache.probs) === 0) right++;
-    }
-    check(
-      `seed ${seed}: a triangle drawn anywhere on the pad gets the highest percentage`,
-      right / N > 0.85,
-      `${((right / N) * 100).toFixed(1)}% of ${N} brush-drawn triangles (random position, size and rotation) recognised`,
-    );
-  }
-
-  // hand-drawn (scribbled) shapes all over the pad
-  const rng = new RNG(seed + 1);
-  const cache = createCache(3);
-  const right = [0, 0, 0];
-  const N = 200;
+// --- speed, accuracy, edges, drawn shapes -----------------------------------
+const startStripes = Array.from({ length: F1 }, (_, f) => stripeShare(lab.net.W1, f));
+trainFor(lab, 30);
+const acc = lab.latestAcc!.acc;
+check("over 85% on the 300 test cards within 30 s", acc > 0.85, `test score ${(acc * 100).toFixed(1)}% after ${lab.step} steps (${lab.cardsSeen} cards); first passed 85% at ${lab.reached85Ms === null ? "never" : (lab.reached85Ms / 1000).toFixed(1) + " s"}`);
+{
+  const stripes = Array.from({ length: F1 }, (_, f) => stripeShare(lab.net.W1, f));
+  const n = stripes.filter((e) => e > 0.55).length;
+  check("stencils start as speckle and at least half look edge-like once trained", n >= 4, `stripe share (speckle is about 0.34), start: [${startStripes.map((e) => e.toFixed(2)).join(" ")}] trained: [${stripes.map((e) => e.toFixed(2)).join(" ")}] (${n}/8 above 0.55)`);
+}
+{
+  const rng = new RNG(9), cache = createCache(3), N = 2000, right = [0, 0, 0];
   for (let cls = 0; cls < 3; cls++)
     for (let i = 0; i < N; i++) {
-      const r = rng.range(5, 9.5);
-      const g = scribbleShape(rng, cls, rng.range(r + 2, 26 - r), rng.range(r + 2, 26 - r), r);
-      forward(lab.net, g, cache);
+      const r = rng.range(5, 10);
+      forward(lab.net, brushShape(cls, rng.range(r + 1.5, 26.5 - r), rng.range(r + 1.5, 26.5 - r), r, rng.range(0, 6.283)), cache);
       if (argmax(cache.probs) === cls) right[cls]++;
     }
-  check(
-    `seed ${seed}: a wobbly scribbled triangle is still usually recognised`,
-    right[0] / N > 0.85,
-    `scribbled shapes recognised: triangle ${((right[0] / N) * 100).toFixed(0)}%, square ${((right[1] / N) * 100).toFixed(0)}%, circle ${((right[2] / N) * 100).toFixed(0)}%`,
-  );
+  const p = right.map((v) => ((v / N) * 100).toFixed(1) + "%");
+  check("a triangle, square or circle drawn anywhere on the pad gets the highest percentage", Math.min(...right) / N > 0.85, `of ${N} brush-drawn shapes each (random place, size and angle): triangles ${p[0]}, squares ${p[1]}, circles ${p[2]}`);
 }
 
-// --- 4. "centred only" training, then shapes in a corner --------------------
+// --- download the brain, load it fresh: same test score -----------------------
 {
-  const seed = SEEDS[0];
+  const file = JSON.stringify(brainToObject(lab.net, acc));
+  const fresh = new Lab();
+  fresh.loadBrain(brainFromObject(JSON.parse(file)) as Net);
+  fresh.flush();
+  check("a downloaded brain, loaded fresh, gets exactly the same test score", fresh.latestAcc!.acc === acc, `${(file.length / 1024).toFixed(1)} KB file; before ${acc}, after ${fresh.latestAcc!.acc}, with no training`);
+}
+
+// --- "centred only" training, then cards in a corner -------------------------
+{
   const variety = { centredOnly: true, noRotation: false, outlinesOnly: false };
-  const lab = new Lab({ seed, variety, lineClass: false });
-  trainFor(lab, 20, LR);
+  const l = new Lab(variety);
+  trainFor(l, 20);
   const rng = new RNG(555);
-  const corner: DataSet = { x: [], y: new Int32Array(300) };
-  const centredSmall: DataSet = { x: [], y: new Int32Array(300) };
+  const corner: Pile = { x: [], y: new Int32Array(300) };
   for (let i = 0; i < 300; i++) {
     corner.y[i] = i % 3;
     corner.x.push(generateShape(rng, i % 3, FULL_VARIETY, { corner: true }));
-    centredSmall.y[i] = i % 3;
-    centredSmall.x.push(generateShape(rng, i % 3, variety));
   }
-  const centredAcc = lab.latestAcc!.acc;
-  const wideAcc = lab.latestAcc!.wide;
-  const cornerAcc = lab.accuracyOn(corner);
-  check(
-    "centred-only training drops on shapes in a corner",
-    centredAcc - cornerAcc > 0.1,
-    `centred test ${(centredAcc * 100).toFixed(1)}%, any-position test ${(wideAcc * 100).toFixed(1)}%, corner shapes ${(cornerAcc * 100).toFixed(1)}%`,
-  );
-}
-
-// --- 5. the 4-class stretch goal still learns --------------------------------
-{
-  const lab = new Lab({ seed: SEEDS[0], variety: FULL_VARIETY, lineClass: true });
-  trainFor(lab, 30, LR);
-  check("with the 'line' distractor class it still learns", lab.latestAcc!.acc > 0.8, `4-class test accuracy ${(lab.latestAcc!.acc * 100).toFixed(1)}% after ${lab.step} steps`);
+  const a = l.latestAcc!;
+  const c = l.accuracyOn(corner);
+  check("centred-only practice, then cards in a corner", a.acc - c > 0.1, `centred test cards ${(a.acc * 100).toFixed(1)}%, cards of every kind ${(a.wide * 100).toFixed(1)}%, small cards in a corner ${(c * 100).toFixed(1)}%`);
 }
 
 console.log(failures ? `\n${failures} check(s) failed` : "\nAll checks passed");

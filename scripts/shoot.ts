@@ -1,120 +1,156 @@
 /**
- * Drives the real page in headless Chromium: takes screenshots and measures the acceptance checks
- * that need a browser (training speed, responsiveness, drawing a triangle, centred-only).
+ * Drives the real page in headless Chromium: screenshots, plus the checks that need a browser
+ * (slow-mo, speed, responsiveness, drawing, try a star, download and load a brain, the card browser).
  * Usage: tsx scripts/shoot.ts [url] [outDir] [quick]
  */
 import { chromium, Page } from "playwright";
+import { readFileSync } from "node:fs";
 
 const url = process.argv[2] ?? "http://localhost:3311";
 const out = process.argv[3] ?? "shots";
 const quick = process.argv[4] === "quick";
+const say = (k: string, v: unknown) => console.log(`${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`);
 
-async function stats(page: Page) {
-  return page.evaluate(() => {
-    const L = (window as any).stencilLab;
-    const a = L.latestAcc;
-    return { step: L.step, examples: L.examplesSeen, acc: a?.acc, wide: a?.wide, trainMs: L.trainMs, reached85Ms: L.reached85Ms };
-  });
-}
-async function bars(page: Page) {
-  return page.$$eval(".bar-row", (rows) => rows.map((r) => `${r.querySelector(".bar-name")!.textContent}=${r.querySelector(".bar-pct")!.textContent}`).join(" "));
-}
-async function fps(page: Page, ms: number): Promise<{ fps: number; worstGap: number }> {
-  // passed as text so the bundler does not inject helpers the page does not have
-  return page.evaluate(`new Promise((res) => {
-    let n = 0, last = performance.now(), worst = 0;
-    const t0 = last;
-    function tick(t) {
-      n++;
-      worst = Math.max(worst, t - last);
-      last = t;
-      if (t - t0 < ${ms}) requestAnimationFrame(tick);
-      else res({ fps: Math.round((n / (t - t0)) * 1000), worstGap: Math.round(worst) });
-    }
-    requestAnimationFrame(tick);
-  })`);
-}
-/** Draw a closed polygon on the pad with the mouse. Points are in grid cells (0..28). */
-async function drawPoly(page: Page, pts: [number, number][]) {
-  await page.getByRole("button", { name: "Clear" }).click();
+const stats = (page: Page) =>
+  page.evaluate(`(() => { const L = window.stencilLab, a = L.latestAcc; return { step: L.step, acc: a && a.acc, wide: a && a.wide, reached85s: L.reached85Ms && +(L.reached85Ms / 1000).toFixed(1), seconds: +(L.trainMs / 1000).toFixed(1) }; })()`);
+const knobSum = (page: Page) => page.evaluate(`(() => { const n = window.stencilLab.net; let s = 0; for (const k of ["W1","b1","W2","b2","W3","b3"]) for (const v of n[k]) s += v; return s; })()`);
+const teach = async (page: Page) => (await page.locator(".teach-line").textContent()) + " | " + (await page.locator(".teach-sub").textContent());
+const fps = (page: Page, ms: number) =>
+  page.evaluate(`new Promise((res) => { let n = 0, last = performance.now(), worst = 0; const t0 = last;
+    function tick(t) { n++; worst = Math.max(worst, t - last); last = t; if (t - t0 < ${ms}) requestAnimationFrame(tick); else res({ fps: Math.round(n / (t - t0) * 1000), worstGapMs: Math.round(worst) }); }
+    requestAnimationFrame(tick); })`);
+
+/** Draw a closed outline on the pad with the mouse. Points are in dots (0..28). */
+async function draw(page: Page, pts: number[][]) {
+  await page.getByRole("button", { name: "Clear and draw" }).click();
   await page.evaluate("window.scrollTo(0, 0)");
   const box = (await page.locator("canvas.pad").boundingBox())!;
-  const P = (p: [number, number]) => [box.x + (p[0] / 28) * box.width, box.y + (p[1] / 28) * box.height] as const;
-  const all = [...pts, pts[0]];
-  await page.mouse.move(...P(all[0]));
+  const P = (p: number[]) => [box.x + (p[0] / 28) * box.width, box.y + (p[1] / 28) * box.height] as const;
+  await page.mouse.move(...P(pts[0]));
   await page.mouse.down();
-  for (let i = 1; i < all.length; i++) await page.mouse.move(...P(all[i]), { steps: 12 });
+  for (const p of [...pts.slice(1), pts[0]]) await page.mouse.move(...P(p), { steps: 10 });
   await page.mouse.up();
   await page.waitForTimeout(250);
+  return page.$$eval(".bar-row", (rows) => rows.map((r) => ({ name: r.querySelector(".bar-name")!.textContent!, pct: parseInt(r.querySelector(".bar-pct")!.textContent!) })).sort((a, b) => b.pct - a.pct)[0].name);
 }
-const tri = (cx: number, cy: number, r: number, rot = -Math.PI / 2): [number, number][] =>
-  [0, 1, 2].map((k) => [cx + r * Math.cos(rot + (k * 2 * Math.PI) / 3), cy + r * Math.sin(rot + (k * 2 * Math.PI) / 3)]);
+const poly = (n: number, cx: number, cy: number, r: number, rot: number) => Array.from({ length: n }, (_, k) => [cx + r * Math.cos(rot + (k * 2 * Math.PI) / n), cy + r * Math.sin(rot + (k * 2 * Math.PI) / n)]);
 
 (async () => {
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1500, height: 1000 }, deviceScaleFactor: 1 });
+  const page = await browser.newPage({ viewport: { width: 1500, height: 1000 }, deviceScaleFactor: 1, acceptDownloads: true });
   const errors: string[] = [];
   page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(String(e)));
   await page.goto(url);
-  await page.waitForFunction(() => (window as any).stencilLab);
+  await page.waitForFunction("window.stencilLab");
   await page.waitForTimeout(800);
   await page.screenshot({ path: `${out}/01-start.png`, fullPage: true });
+  await page.getByRole("button", { name: "Flip the card" }).click();
+  await page.waitForTimeout(700);
+  await page.screenshot({ path: `${out}/02-flipped.png` });
 
-  await page.locator(".stencil").nth(2).hover();
-  await page.waitForTimeout(300);
-  await page.screenshot({ path: `${out}/02-hover-stencil.png` });
-  await page.mouse.move(5, 5);
+  // slow-mo: five stages on one card, after a little training so there is something to see
+  await page.getByRole("button", { name: "Train", exact: true }).click();
+  await page.waitForTimeout(1500);
+  await page.getByRole("button", { name: "Pause" }).click();
+  await page.waitForTimeout(400);
+  const before = await knobSum(page);
+  await page.getByRole("button", { name: "Slow-mo", exact: true }).click();
+  for (let stage = 1; stage <= 5; stage++) {
+    await page.waitForTimeout(stage === 2 ? 2600 : 700);
+    say(`slow-mo stage ${stage}`, await teach(page));
+    if (stage === 3) {
+      const sum = (await page.locator(".sum").textContent())!;
+      const bet = Number(/bet ([\d.]+)%/.exec(sum)![1]) / 100;
+      const [, p, loss] = /ln\(([\d.e-]+)\) = ([\d.]+)/.exec(sum)!;
+      say("stage 3 sum", `${sum.replace(/\s+/g, " ")} -> bet ${bet}, ln of ${p}, shown ${loss}, recomputed ${(-Math.log(Number(p))).toFixed(2)}; consistent: ${Math.abs(bet - Number(p)) < 1e-9 && (-Math.log(Number(p))).toFixed(2) === loss}`);
+    }
+    await page.screenshot({ path: `${out}/03-slowmo-${stage}.png` });
+    if (stage < 5) await page.getByRole("button", { name: "Next", exact: true }).click();
+  }
+  say("slow-mo left the brain unchanged", (await knobSum(page)) === before);
+  await page.getByRole("button", { name: "Stop" }).click();
 
-  // train for 30 seconds of wall-clock time
+  // fast training for 30 seconds by the clock
+  await page.getByRole("button", { name: "Reset" }).click();
   await page.getByRole("button", { name: "Train", exact: true }).click();
   await page.waitForTimeout(2000);
-  const early = await fps(page, 3000);
-  await page.screenshot({ path: `${out}/03-training-5s.png`, fullPage: true });
+  const speed = await fps(page, 3000);
+  await page.screenshot({ path: `${out}/04-training.png`, fullPage: true });
   if (!quick) await page.waitForTimeout(25000);
-  const s30 = await stats(page);
-  console.log("after ~30 s of training:", JSON.stringify(s30), "| frames/s while training:", JSON.stringify(early));
+  say("after ~30 s of training", await stats(page));
+  say("frames a second while training", speed);
   await page.getByRole("button", { name: "Pause" }).click();
-  await page.waitForTimeout(500);
-  await page.screenshot({ path: `${out}/04-trained.png`, fullPage: true });
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: `${out}/05-trained.png`, fullPage: true });
 
-  await page.locator(".stencil").nth(1).click();
-  await page.waitForTimeout(300);
-  await page.screenshot({ path: `${out}/05-stencil-numbers.png` });
-  {
-    const box = (await page.locator("canvas.pad").boundingBox())!;
-    await page.mouse.move(box.x + 150, box.y + 30);
-    await page.mouse.move(box.x + 110, box.y + 110, { steps: 5 });
-    await page.waitForTimeout(300);
-    await page.screenshot({ path: `${out}/05b-slide-by-hand.png` });
+  // draw each shape in several places
+  const places = [[14, 14, 9, -1.57], [9, 9, 6, 0.3], [19, 18, 7, 1.1], [19, 9, 6, 2.0], [10, 18, 7, 0.5], [14, 14, 11, 0.9]];
+  for (const [n, name] of [[3, "triangle"], [4, "square"], [24, "circle"]] as const) {
+    let wins = 0;
+    for (const [cx, cy, r, rot] of places) if ((await draw(page, poly(n, cx, cy, r, rot))) === name) wins++;
+    say(`mouse-drawn ${name}s recognised`, `${wins}/${places.length}`);
   }
-  await page.keyboard.press("Escape");
-  await page.locator(".unit").nth(3).hover();
-  await page.waitForTimeout(300);
-  await page.screenshot({ path: `${out}/06-hover-unit.png` });
-  await page.mouse.move(5, 5);
+  await page.screenshot({ path: `${out}/06-drawn.png` });
 
-  // draw triangles in different places
-  const spots: [number, number, number, number][] = [[14, 15, 9, -Math.PI / 2], [8, 9, 6, 0.3], [19, 19, 7, 1.1], [20, 8, 6, 2.0], [9, 20, 7, -0.6], [14, 14, 11, 0.9]];
-  let wins = 0;
-  for (const [cx, cy, r, rot] of spots) {
-    await drawPoly(page, tri(cx, cy, r, rot));
-    const b = await bars(page);
-    const verdict = (await page.locator(".verdict-line").textContent()) ?? "";
-    if (verdict.toLowerCase().includes("triangle")) wins++;
-    console.log(`triangle at (${cx},${cy}) r=${r}: ${b} -> ${await page.locator(".verdict-line").textContent()}`);
+  // try a star: it has to choose one of the three boxes
+  const picks: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    await page.getByRole("button", { name: "Try a star" }).click();
+    await page.waitForTimeout(250);
+    picks.push((await page.locator(".marking b").textContent())!);
   }
-  console.log(`drawn triangles recognised: ${wins}/${spots.length}`);
-  await page.screenshot({ path: `${out}/07-drawn-triangle.png`, fullPage: true });
+  say("try a star picked", picks.join(", ") + " | " + (await teach(page)));
+  await page.screenshot({ path: `${out}/07-star.png` });
+
+  // look inside the brain: download it, reset, load it back
+  await page.getByRole("button", { name: "Look inside the brain" }).click();
+  await page.waitForTimeout(700);
+  await page.screenshot({ path: `${out}/08-brain.png` });
+  say("numbers shown in the brain view", await page.locator(".modal [data-k]").count());
+  const [download] = await Promise.all([page.waitForEvent("download"), page.getByRole("button", { name: /Download the brain/ }).click()]);
+  const file = `${out}/brain.json`;
+  await download.saveAs(file);
+  const saved = JSON.parse(readFileSync(file, "utf8"));
+  await page.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("button", { name: "Reset" }).click();
+  await page.waitForTimeout(600);
+  const fresh = (await stats(page)) as { acc: number };
+  await page.getByRole("button", { name: "Look inside the brain" }).click();
+  await page.locator('input[type="file"]').setInputFiles(file);
+  await page.waitForTimeout(600);
+  const loaded = (await stats(page)) as { acc: number; step: number };
+  say("download and load a brain", `${(readFileSync(file).length / 1024).toFixed(1)} KB, ${saved.knobs} knobs; file says ${saved.testScore}; fresh reset scored ${fresh.acc}; after loading ${loaded.acc} at step ${loaded.step}; exact match: ${loaded.acc === saved.testScore}`);
+  await page.screenshot({ path: `${out}/09-brain-loaded.png` });
+  await page.getByRole("button", { name: "Close" }).click();
+
+  // browse the cards
+  await page.getByRole("button", { name: "Browse the cards" }).click();
+  await page.waitForTimeout(800);
+  say("card piles", (await page.locator(".pile-counts").allTextContents()).map((t) => t.replace(/\s+/g, " ")).join(" || "));
+  await page.getByRole("switch", { name: /hardest first/ }).click();
+  await page.getByRole("button", { name: "got it wrong" }).click();
+  await page.waitForTimeout(400);
+  await page.locator(".pile.practice canvas").click({ position: { x: 30, y: 30 } });
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: `${out}/10-cards.png` });
+  say("picked card", (await page.locator(".modal footer span").textContent())!.replace(/\s+/g, " "));
+  await page.getByRole("button", { name: /Slow-mo on this card/ }).click();
+  await page.waitForTimeout(600);
+  say("slow-mo on a picked card", await teach(page));
+  await page.getByRole("button", { name: "Stop" }).click();
 
   // story mode
+  await page.evaluate("window.scrollTo(0, 0)");
   await page.getByRole("button", { name: "Story mode" }).click();
-  await page.waitForTimeout(500);
-  await page.screenshot({ path: `${out}/08-story-1.png`, fullPage: true });
-  for (let i = 0; i < 4; i++) await page.getByRole("button", { name: "Next" }).click();
-  await page.waitForTimeout(500);
-  await page.screenshot({ path: `${out}/09-story-5.png`, fullPage: true });
-  await page.getByRole("button", { name: "Done" }).click();
+  const steps: string[] = [];
+  for (let i = 0; i < 7; i++) {
+    await page.waitForTimeout(250);
+    steps.push((await page.locator(".teach-name").textContent())!.trim());
+    if (i === 0 || i === 6) await page.screenshot({ path: `${out}/11-story-${i + 1}.png` });
+    await page.getByRole("button", { name: i < 6 ? "Next idea" : "Finish" }).click();
+  }
+  say("story steps", steps.join(" > "));
 
   // centred only
   if (!quick) {
@@ -123,45 +159,20 @@ const tri = (cx: number, cy: number, r: number, rot = -Math.PI / 2): [number, nu
     await page.getByRole("button", { name: "Train", exact: true }).click();
     await page.waitForTimeout(20000);
     await page.getByRole("button", { name: "Pause" }).click();
-    console.log("centred-only after 20 s:", JSON.stringify(await stats(page)));
-    await drawPoly(page, tri(7, 7, 5.5, 0.4));
-    console.log("triangle in a corner, centred-only network:", await bars(page));
-    await drawPoly(page, tri(14, 14, 8, 0.4));
-    console.log("triangle in the middle, centred-only network:", await bars(page));
-    await page.screenshot({ path: `${out}/10-centred-only.png`, fullPage: true });
+    say("centred-only after 20 s", await stats(page));
+    say("small triangle in a corner, centred-only brain", await draw(page, poly(3, 6.5, 6.5, 4.5, 0.4)));
+    await page.evaluate("window.scrollTo(0, 0)");
+    await page.screenshot({ path: `${out}/12-centred-only.png`, fullPage: true });
   }
 
-  // under the hood: run the gradient check in the browser
-  await page.locator("details.hood summary").click();
-  await page.getByRole("button", { name: /Run the check/ }).click();
-  await page.waitForTimeout(400);
-  const verdicts = await page.$$eval("table.math tbody td:last-child", (tds) => tds.map((t) => t.textContent).join(","));
-  console.log("in-browser gradient check:", verdicts);
-  await page.locator("details.hood").screenshot({ path: `${out}/13-under-the-hood.png` });
+  const untitled = await page.evaluate(`[...document.querySelectorAll(".lab *")].filter((e) => e.children.length === 0 && /\\d/.test(e.textContent) && !e.closest("[title]") && !e.closest("h1,h2,.letter,.num,small,.teach-num,.idea-dots,.teach-line,.teach-sub,.hint,.field-note,.versus,.fast,.boxes,.note,.sub,.zoom")).map((e) => e.textContent.trim().slice(0, 40))`);
+  say("numbers without a hover note", untitled);
 
-  // stretch goal: the 4th class
-  if (!quick) {
-    await page.evaluate("window.scrollTo(0, 0)");
-    if (await page.getByRole("switch", { name: "centred only" }).getAttribute("aria-checked") === "true")
-      await page.getByRole("switch", { name: "centred only" }).click();
-    await page.getByRole("switch", { name: /4th shape/ }).click();
-    await page.getByRole("button", { name: /Reset/ }).click();
-    await page.getByRole("button", { name: "Train", exact: true }).click();
-    await page.waitForTimeout(20000);
-    await page.getByRole("button", { name: "Pause" }).click();
-    console.log("4 classes after 20 s:", JSON.stringify(await stats(page)));
-    await page.evaluate("window.scrollTo(0, 0)");
-    await page.screenshot({ path: `${out}/14-four-classes.png`, fullPage: true });
+  for (const [w, h, name] of [[1024, 1366, "13-tablet"], [1280, 800, "14-laptop-1280"]] as const) {
+    await page.setViewportSize({ width: w, height: h });
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: `${out}/${name}.png`, fullPage: true });
   }
-
-  // tablet width
-  await page.setViewportSize({ width: 1024, height: 1366 });
-  await page.waitForTimeout(400);
-  await page.screenshot({ path: `${out}/11-tablet.png`, fullPage: true });
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await page.waitForTimeout(400);
-  await page.screenshot({ path: `${out}/12-laptop-1280.png`, fullPage: true });
-
   console.log(errors.length ? `console errors:\n${errors.join("\n")}` : "no console errors");
   await browser.close();
 })();
