@@ -5,11 +5,15 @@ import { chromium } from "playwright";
   const page = await browser.newPage({ viewport: { width: 1500, height: 1000 } });
   await page.goto(process.argv[2] ?? "http://localhost:3311");
   await page.waitForFunction("window.stencilLab");
+  if (process.env.SEED) {
+    await page.getByLabel("Seed").fill(process.env.SEED);
+    await page.getByRole("button", { name: /Reset/ }).click();
+  }
   await page.getByRole("button", { name: "Train", exact: true }).click();
   await page.waitForTimeout(Number(process.env.TRAIN_MS ?? 15000));
   await page.getByRole("button", { name: "Pause" }).click();
   let wins = 0, n = 0;
-  for (const [cx, cy, r, rot] of [[14, 15, 9, -1.57], [8, 9, 6, 0.3], [19, 19, 7, 1.1], [20, 8, 6, 2.0], [9, 20, 7, -0.6], [14, 14, 11, 0.9], [10, 10, 5, 0], [18, 12, 8, 2.6], [13, 18, 8, 0.5], [7, 20, 5, 1.0]]) {
+  for (const [cx, cy, r, rot] of [[14, 15, 9, -1.57], [8, 9, 6, 0.3], [19, 19, 7, 1.1], [20, 8, 6, 2.0], [9, 20, 7, -0.6], [14, 14, 11, 0.9], [10, 10, 5, 0], [18, 12, 8, 2.6], [13, 18, 8, 0.5], [7, 20, 5, 1.0], [9, 18.5, 7, -0.6], [9, 19.3, 7, -0.6]]) {
     await page.getByRole("button", { name: "Clear" }).click();
     await page.evaluate("window.scrollTo(0, 0)");
     const box = (await page.locator("canvas.pad").boundingBox())!;

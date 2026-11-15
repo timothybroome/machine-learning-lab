@@ -53,8 +53,8 @@ are from `scripts/shoot.ts` in headless Chromium with seed 7 and the default nud
 | Check | Result |
 | --- | --- |
 | At Reset, layer-1 stencils look like random speckle | Yes. Starting knobs are small random values; each stencil is drawn scaled to its own largest knob. |
-| Over 85% test accuracy, with at least half the stencils edge-like | 85% is passed after about 8 to 11 s and about 1,100 steps; 92 to 95% after 30 s. After training, 7 or 8 of the 8 stencils are dominated by a single stripe direction (a "stripe share" above 0.55, where random speckle scores about 0.34). To the eye they are bars and diagonals rather than textbook edges, because most of the ink is thin outlines. |
-| Drawing a triangle anywhere gives it the highest percentage | Mostly. Mouse-drawn triangles in six places: five recognised. Simulated wobbly scribbles all over the pad: 89 to 99% of triangles recognised. The failures are triangles that touch the very edge of the pad: training shapes keep 1.5 pixels clear of the edge and the first layer cannot see the outer 2 pixels well. Squares are the weakest class for hand drawings (about 80 to 88%). |
+| Over 85% test accuracy, with at least half the stencils edge-like | 85% is passed after about 8 to 11 s; 92 to 95% after 30 s. After training, 7 or 8 of the 8 stencils are dominated by a single stripe direction (a "stripe share" above 0.55, where random speckle scores about 0.34). To the eye they are bars and diagonals rather than textbook edges, because most of the ink is thin outlines. |
+| Drawing a triangle anywhere gives it the highest percentage | Nearly always, not always. Of 3,000 clean triangles drawn with the pad's brush at random positions, sizes and rotations, 99.0%, 96.7% and 87.5% were recognised on the three seeds. In the browser, five of six scripted mouse-drawn triangles were recognised; the sixth (a downward-pointing triangle, low on the left) is called a square on every seed tried, and moving it away from the edge does not fix it. Wobbly simulated scribbles: 92 to 98% of triangles, 81 to 86% of squares and 92 to 97% of circles recognised. |
 | "Centred only", then shapes in a corner | A clear drop. Centred test score 99 to 100%, but 55 to 57% on shapes of every kind (the purple line on the chart), and about 30% on small shapes pushed into a corner, which is chance. Pooling does not rescue it, because the final judge has only ever seen points arrive in the middle. A large triangle drawn towards a corner is still often recognised. |
 | Page stays responsive while training | About 52 frames a second while training, worst gap between frames 33 ms. Training gets 11 ms of each animation frame. |
 | Same seed, same stencils and curve | Yes, bit for bit, including when run with very different time slices. Scoring jobs always finish before the next training step, so results depend only on the seed and step count, not on how fast the computer is. |
@@ -68,7 +68,7 @@ are from `scripts/shoot.ts` in headless Chromium with seed 7 and the default nud
   down to about 45%, which is confusing to watch. Without the decay, the starting speckle never fades and
   the stencils do not visibly turn into lines. Both are stated in the page under "Under the hood".
 - **Shapes are regular.** Making triangles lopsided and squares oblong, or letting shapes touch the grid
-  edge, cost 6 to 8 points of test accuracy at this network size, so the generator keeps shapes regular with
+  edge, cost about 6 to 7 points of test accuracy at this network size, so the generator keeps shapes regular with
   a small corner wobble.
 - **"Size" means** the triangle's side, roughly the square's side, or the circle's width, from 8 to 20 pixels.
 - **Additions:** a report card (per-shape results on the test set), an eraser, the latest mini-batch shown

@@ -3,7 +3,7 @@
  * Run with: npm run check
  */
 import { RNG } from "../lib/rng";
-import { FULL_VARIETY, generateShape, scribbleShape } from "../lib/shapes";
+import { FULL_VARIETY, generateShape, scribbleShape, stampSegment } from "../lib/shapes";
 import { F1, argmax, createCache, createNet, forward, gradientCheck } from "../lib/net";
 import { DataSet, Lab } from "../lib/lab";
 import { orientedShare } from "../lib/analysis";
@@ -87,6 +87,30 @@ for (const seed of SEEDS) {
     `stripe share per stencil (random speckle is about 0.34), start: [${startEdges.map((e) => e.toFixed(2)).join(" ")}]  trained: [${edges.map((e) => e.toFixed(2)).join(" ")}]  (${edgy}/8 above 0.55)`,
   );
 
+  // clean triangles drawn with the pad's own brush: any position, size and rotation
+  {
+    const rng = new RNG(seed + 2);
+    const cache = createCache(3);
+    const N = 3000;
+    let right = 0;
+    for (let i = 0; i < N; i++) {
+      const r = rng.range(5, 10);
+      const rot = rng.range(0, Math.PI * 2);
+      const cx = rng.range(r + 1.5, 26.5 - r);
+      const cy = rng.range(r + 1.5, 26.5 - r);
+      const g = new Float64Array(784);
+      const p = [0, 1, 2, 0].map((k) => [cx + r * Math.cos(rot + (k * 2 * Math.PI) / 3), cy + r * Math.sin(rot + (k * 2 * Math.PI) / 3)]);
+      for (let k = 0; k < 3; k++) stampSegment(g, p[k][0], p[k][1], p[k + 1][0], p[k + 1][1], 2);
+      forward(lab.net, g, cache);
+      if (argmax(cache.probs) === 0) right++;
+    }
+    check(
+      `seed ${seed}: a triangle drawn anywhere on the pad gets the highest percentage`,
+      right / N > 0.85,
+      `${((right / N) * 100).toFixed(1)}% of ${N} brush-drawn triangles (random position, size and rotation) recognised`,
+    );
+  }
+
   // hand-drawn (scribbled) shapes all over the pad
   const rng = new RNG(seed + 1);
   const cache = createCache(3);
@@ -100,7 +124,7 @@ for (const seed of SEEDS) {
       if (argmax(cache.probs) === cls) right[cls]++;
     }
   check(
-    `seed ${seed}: a scribbled triangle anywhere on the pad wins`,
+    `seed ${seed}: a wobbly scribbled triangle is still usually recognised`,
     right[0] / N > 0.85,
     `scribbled shapes recognised: triangle ${((right[0] / N) * 100).toFixed(0)}%, square ${((right[1] / N) * 100).toFixed(0)}%, circle ${((right[2] / N) * 100).toFixed(0)}%`,
   );
